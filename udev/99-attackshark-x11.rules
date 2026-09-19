@@ -1,0 +1,52 @@
+# Attack Shark X11 2.4 GHz receiver (VID 1d57 / PID fa60).
+#
+# The receiver is a four-interface composite HID device. USB interface #2 is
+# the vendor configuration channel that pushes the battery and DPI stage
+# reports, and it is the only channel the application opens.
+#
+# Why this is split into two rules
+# --------------------------------
+# Every ATTRS match in a single rule must resolve to the same parent device,
+# and udev silently refuses to match otherwise. A first attempt at this file
+# combined ATTRS{idVendor}/ATTRS{idProduct} (which live on the USB *device*)
+# with ATTRS{bInterfaceNumber} (which lives on the USB *interface*), and the
+# rule matched nothing at all: no ACL, no symlink, and no error anywhere.
+# The rules below are split so that each one only ever asks attributes of a
+# single parent, following the same pattern as the system's own
+# 60-steam-input.rules.
+
+# Rule 1: access for the logged-in user.
+# Both attributes belong to the USB device, so they agree on their parent.
+#
+# Belt and braces, because on Linux Mint 22.3 / Cinnamon the ACL route did not
+# actually work for this device:
+#
+#   * GROUP + MODE is what grants access in practice. plugdev is the Debian and
+#     Ubuntu convention for hotpluggable devices, and the desktop user is
+#     already a member. On another distribution, either add the user to
+#     plugdev or change GROUP to a group they are in.
+#   * TAG+="uaccess" is kept for systems where logind does grant the ACL. It is
+#     harmless when it does not: it produces no error, just no ACL.
+#
+# Measured on this machine: the uaccess tag is applied to the node and to all
+# four of the receiver's hidraw nodes, but no ACL appears, because no device in
+# this receiver's parent chain ever gets ID_SEAT, so logind has no seat to
+# grant it for. /dev/uinput and /dev/snd/controlC0 do get a user ACL, which is
+# how the difference was pinned down.
+#
+# This unavoidably also covers the receiver's keyboard, mouse and
+# consumer-control channels, because they share the same USB device. That is
+# the pattern every game-controller rule on this system uses, and those
+# channels are already reachable by the user through /dev/input.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="1d57", ATTRS{idProduct}=="fa60", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
+# Rule 2: a stable path to the configuration channel.
+# The USB interface's modalias carries vendor, product *and* interface number
+# in one attribute, so unlike rule 1 this needs no cross-parent matching at all.
+# Written as "usb:v1D57pFA60*in02" so a firmware revision or a change to the
+# interface's class fields does not break it.
+#
+# The hidraw node number is not stable: this receiver has been seen as hidraw2
+# and as hidraw3 on different machines, so the application prefers this symlink
+# and falls back to scanning sysfs if it is missing.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{modalias}=="usb:v1D57pFA60*in02", SYMLINK+="attackshark-x11"

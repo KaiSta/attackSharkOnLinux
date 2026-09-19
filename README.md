@@ -81,7 +81,10 @@ The file is `stage=value`, one per line, all six required:
 ```
 
 `examples/dpi.conf` is an annotated copy of that, and `tools/install.sh` drops
-it into place if you do not already have one. Values outside 1–22,000 are
+it into place if you do not already have one. The tray's own menu reaches it too:
+**Open DPI config** opens the file in your editor, writing that template first if
+the file does not exist yet. The values are read once at startup, so restart the
+tray to pick up an edit. Values outside 1–22,000 are
 rejected, because the sensor's published maximum makes a bigger number a typo
 rather than a setting. A malformed file is a startup error rather than something
 silently ignored — quietly discarding values you deliberately wrote is worse
@@ -129,18 +132,19 @@ belongs in a tool whose whole value is that it never lies to you.
 
 ## Install
 
-Needs Go 1.21+ and, once, one privileged step for device access.
+Needs Go 1.24+ (the version in `go.mod`) and, once, one privileged step for
+device access.
 
 ```bash
 # 1. Device access (once). Needs root, changes nothing else on the system.
 sudo tools/install-udev.sh
 
-# 2. Confirm discovery and permissions, then build and install for your user.
-go build -o bin/attackshark-probe ./cmd/attackshark-probe
-./bin/attackshark-probe info
+# 2. Build and install for your user: both binaries into ~/.local/bin, an
+#    autostart entry, the docs, and a template at ~/.config/attackshark-x11/dpi.conf.
+tools/install.sh
 
-tools/install.sh          # tray app to ~/.local/bin, autostart entry, and a
-                          # template at ~/.config/attackshark-x11/dpi.conf
+# 3. Check the whole path, including whatever step 1 could have got wrong.
+attackshark-probe doctor
 ```
 
 Then start it now, or log out and back in:
@@ -149,14 +153,20 @@ Then start it now, or log out and back in:
 ~/.local/bin/attackshark-x11-tray -v
 ```
 
+`doctor` is the quickest way to tell an installation problem from a mouse that is
+simply asleep: it prints one line per check and exits non-zero only when
+something actually stops the app from working.
+
 Undo everything:
 
 ```bash
-rm ~/.config/autostart/attackshark-x11-tray.desktop
-rm ~/.local/bin/attackshark-x11-tray
-rm ~/.config/attackshark-x11/dpi.conf
-sudo rm /etc/udev/rules.d/99-attackshark-x11.rules
+tools/uninstall.sh                   # binaries, autostart entry, installed docs
+tools/uninstall.sh --purge           # also dpi.conf and the remembered stage
+sudo tools/uninstall.sh --with-udev  # also the udev rule in /etc
 ```
+
+Your `dpi.conf` and the remembered stage survive a plain `uninstall.sh` on
+purpose: they describe your mouse, and nothing can regenerate them.
 
 ### The udev rule, and why it looks the way it does
 
@@ -211,9 +221,16 @@ attackshark-x11-tray -h
 
 The menu shows the live battery reading, the DPI stage with its configured
 value, the connection state, and a read-only **DPI stages** submenu listing all
-six stages with the current one ticked. On quit, replacing the receiver, or
+six stages with the current one ticked. **Open DPI config** opens the file the
+values come from in your own editor, creating it from the annotated template if
+it is missing. On quit, replacing the receiver, or
 unplugging it, the icon turns grey and the app reopens the device when it
 returns — no restart needed.
+
+**One instance per session.** A second copy exits with a message naming the lock
+file instead of adding a second icon, because two instances would both open the
+receiver and compete for its reports. The lock is a kernel lock on an open file
+descriptor, so nothing stale can survive a crash or a `kill -9`.
 
 **A reading that stops arriving says so.** Every battery report is timestamped,
 and the age is shown once the heartbeats stop: the tooltip reads
@@ -263,11 +280,21 @@ attackshark-probe battery    # wait for the next heartbeat, print it
 attackshark-probe stage      # wait for a stage announcement (tap the DPI button)
 attackshark-probe stream     # decode every status report as it arrives
 attackshark-probe dump       # hexdump every frame, for reverse engineering
+attackshark-probe doctor     # check the installation, not the device
 ```
 
 Every subcommand is read-only. `-changes-only` on `stream` filters out repeat
 heartbeats. `stage` prints the stage number, and says so if you were expecting a
 DPI value to come with it.
+
+`doctor` is the one to reach for when the tray shows nothing, or shows less than
+you expect. It checks the udev rule and its symlink, opens the receiver the way
+the app does and waits for one report, reads your `dpi.conf`, looks for the
+installed tray binary and autostart entry, and asks the session bus whether
+notifications have a daemon to reach. Each line is `ok`, `warn` or `FAIL`: a
+warning is something the app copes with (a missing symlink, a mouse that is
+asleep), a failure is something that stops it, and only failures make the command
+exit non-zero.
 
 ## The protocol
 
@@ -381,10 +408,14 @@ demonstration, including the hub's device database and the binding check.
   every extra mechanism cost the fin legibility. `attackshark-icons -html` writes
   a self-contained page showing every state on a light and a dark panel, which is
   the only way to judge that trade-off by eye.
-- **Notifications are fire-and-forget.** Low battery warns at 20 % and 10 %,
-  once per threshold per discharge cycle, re-armed when charging starts. "Full"
-  is a deliberate heuristic (≥99 % while charging) and is commented as such,
-  because the mouse has no distinct full state.
+- **Notifications are fire-and-forget, not fire-once.** Low battery warns at
+  20 % and 10 %, once per threshold per discharge cycle, re-armed when charging
+  starts. "Full" is a deliberate heuristic (≥99 % while charging) and is
+  commented as such, because the mouse has no distinct full state. A post that
+  fails is retried once after five minutes, and the notifier refuses to try again
+  for that long in between: a desktop whose notification daemon is missing, or has
+  just been restarted, loses one warning rather than every notification for the
+  rest of the session.
 - **No package in this repository writes to the device.** The only ioctls
   implemented are reads; `GetFeature` is kept solely to document the negative
   result above.
@@ -420,6 +451,21 @@ go test ./...     # protocol, DPI parsing, config loading, icon geometry, descri
 go vet ./...
 gofmt -l .
 ```
+
+`.github/workflows/ci.yml` runs those three on every push and pull request, plus
+a shell syntax check and a ten-second run of each fuzz target. The parsers are
+fuzzed as well as unit tested, because a byte stream from the mouse and a config
+file written by hand are both untrusted input:
+
+```bash
+go test ./internal/mouse -run='^$' -fuzz=FuzzParseBattery -fuzztime=30s
+go test ./internal/mouse -run='^$' -fuzz=FuzzParseDPIStages -fuzztime=30s
+go test ./internal/trayapp -run='^$' -fuzz=FuzzLoadDPIStages -fuzztime=30s
+```
+
+A failing input is written to `testdata/fuzz/<target>/` and is a permanent case
+from then on; the seed corpus in each test holds the frames and files captured
+from real hardware.
 
 The icon can be rendered without a running tray, which is how the image at the
 top of this file is regenerated:

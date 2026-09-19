@@ -1,0 +1,34 @@
+# Optional systemd user unit for the Attack Shark X11 tray app.
+#
+# On Cinnamon the autostart entry installed by tools/install.sh is the simpler
+# route, because the tray icon needs to appear inside the running graphical
+# session. Use this instead if you prefer systemd to manage the process:
+#
+#     mkdir -p ~/.config/systemd/user
+#     cp systemd/attackshark-x11-tray.service ~/.config/systemd/user/
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now attackshark-x11-tray.service
+#
+# Note that the Cinnamon autostart entry and this unit must not both be enabled.
+# The app takes a single-instance lock, so the loser exits with a message rather
+# than drawing a second tray icon - but that still means a service restarting
+# every few seconds, which is what the start limit below is for.
+
+[Unit]
+Description=Attack Shark X11 battery and DPI stage tray monitor
+Documentation=file:%h/.local/share/doc/attackshark-x11/README.md
+# A duplicate instance exits immediately, and so does a malformed dpi.conf; both
+# are permanent conditions, unlike a receiver that is temporarily unplugged
+# (which the app retries internally without exiting). Give up after a few
+# attempts rather than restarting for ever.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/attackshark-x11-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

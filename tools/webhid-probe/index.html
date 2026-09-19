@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attack Shark X11 - WebHID probe</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  button { font: inherit; padding: .5rem .9rem; margin-right: .5rem; }
+  pre { background: rgba(127,127,127,.12); padding: 1rem; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+  .warn { background: rgba(214,69,69,.12); border-left: 3px solid #d64545; padding: .75rem 1rem; }
+  .ok { color: #3fa45b; }
+  .bad { color: #d64545; }
+</style>
+</head>
+<body>
+<h1>Attack Shark X11 &mdash; can Chromium's WebHID reach the receiver?</h1>
+
+<p>
+  Attack Shark's browser-based configuration tool is a WebHID application. This page uses the
+  same API to find out whether WebHID works against this mouse's receiver on Linux &mdash; the
+  part that cannot be determined without trying it.
+</p>
+
+<div class="warn">
+  <strong>This page only reads.</strong> It never calls <code>sendReport</code> or
+  <code>sendFeatureReport</code>, so it cannot change a single setting on the mouse. Nothing is
+  sent anywhere except back to the tiny local server that served this page, which writes the
+  result to a file on this machine.
+</div>
+
+<p>
+  Click <strong>Connect the receiver</strong>, then choose the entry for
+  <code>1d57:fa60</code> (it may be listed as <em>Xenta 2.4G Wireless Device</em> or similar) in
+  the dialog and press Connect. Leave the tab open for about five seconds afterwards.
+</p>
+
+<p>
+  <button id="filtered">Connect the receiver (1d57:fa60)</button>
+  <button id="any">List all HID devices instead</button>
+</p>
+
+<pre id="log">waiting...</pre>
+
+<script>
+"use strict";
+
+const logEl = document.getElementById("log");
+const notes = [];
+let errorText = "";
+
+function log(line) {
+  logEl.textContent += "\n" + line;
+}
+
+function deviceSummary(device) {
+  return {
+    vendorId: device.vendorId,
+    productId: device.productId,
+    productName: device.productName,
+    opened: device.opened,
+    collections: (device.collections || []).map(c => ({
+      usagePage: c.usagePage,
+      usage: c.usage,
+      inputReports: (c.inputReports || []).map(r => ({ reportId: r.reportId, items: (r.items || []).length })),
+      outputReports: (c.outputReports || []).map(r => ({ reportId: r.reportId, items: (r.items || []).length })),
+      featureReports: (c.featureReports || []).map(r => ({ reportId: r.reportId, items: (r.items || []).length })),
+    })),
+  };
+}
+
+function toHex(view, limit) {
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, Math.min(view.byteLength, limit));
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join(" ");
+}
+
+// Feature report ids worth asking for: the declared vendor block, its first
+// entries, and one that is deliberately not declared, as a control.
+const FEATURE_IDS = [0x09, 0x04, 0x05, 0x2e, 0x3f];
+
+async function readFeatureReports(device) {
+  const results = [];
+  for (const id of FEATURE_IDS) {
+    try {
+      const view = await device.receiveFeatureReport(id);
+      results.push({
+        reportId: id,
+        ok: true,
+        byteLength: view.byteLength,
+        bytes: toHex(view, 16),
+      });
+      log(`  feature 0x${id.toString(16)}: ok, ${view.byteLength} bytes: ${toHex(view, 16)}`);
+    } catch (err) {
+      results.push({ reportId: id, ok: false, error: String(err && err.message || err) });
+      log(`  feature 0x${id.toString(16)}: FAILED (${err && err.message || err})`);
+    }
+  }
+  return results;
+}
+
+// Listen for input reports for a few seconds: the battery heartbeat arrives
+// every ~2s, so this is the test of whether the status channel is readable.
+function collectInputReports(devices, seconds) {
+  const seen = new Map();
+  const listeners = [];
+
+  for (const device of devices) {
+    const handler = event => {
+      const key = `${event.reportId}:${event.data.byteLength}`;
+      const entry = seen.get(key) || {
+        reportId: event.reportId,
+        byteLength: event.data.byteLength,
+        bytes: toHex(event.data, 8),
+        count: 0,
+      };
+      entry.count++;
+      seen.set(key, entry);
+    };
+    device.addEventListener("inputreport", handler);
+    listeners.push([device, handler]);
+  }
+
+  return new Promise(resolve => {
+    setTimeout(() => {
+      for (const [device, handler] of listeners) {
+        device.removeEventListener("inputreport", handler);
+      }
+      resolve(Array.from(seen.values()));
+    }, seconds * 1000);
+  });
+}
+
+async function run(requested) {
+  logEl.textContent = "starting...";
+  if (!navigator.hid) {
+    errorText = "navigator.hid is undefined: this browser has no WebHID";
+    log(errorText);
+    await send({ hidApiPresent: false, error: errorText });
+    return;
+  }
+
+  let devices = [];
+  try {
+    devices = await requested();
+  } catch (err) {
+    if (err && err.name === "NotFoundError") {
+      notes.push("the device dialog was dismissed without a selection");
+    } else {
+      errorText = String(err && err.message || err);
+      notes.push("requestDevice failed: " + errorText);
+    }
+    log(errorText || notes[notes.length - 1]);
+    await send({ connectedDevices: [], error: errorText });
+    return;
+  }
+
+  log(`selected ${devices.length} device(s)`);
+  const summaries = [];
+  const featureReads = [];
+
+  for (const device of devices) {
+    let openError = "";
+    try {
+      if (!device.opened) {
+        await device.open();
+      }
+      log(`opened ${device.productName || "(unnamed)"} ${hex(device.vendorId)}:${hex(device.productId)}`);
+    } catch (err) {
+      openError = String(err && err.message || err);
+      log(`open FAILED: ${openError}`);
+    }
+
+    const summary = deviceSummary(device);
+    summary.openError = openError;
+    summaries.push(summary);
+
+    for (const c of summary.collections) {
+      log(`  collection usage page 0x${c.usagePage.toString(16)} usage 0x${c.usage.toString(16)}: ` +
+          `${c.inputReports.length} input, ${c.outputReports.length} output, ${c.featureReports.length} feature reports`);
+    }
+
+    if (!openError) {
+      log("  reading feature reports...");
+      featureReads.push(...await readFeatureReports(device));
+    }
+  }
+
+  log("listening for input reports for 5s (wiggle the mouse, or wait for the heartbeat)...");
+  const inputs = await collectInputReports(devices, 5);
+  log(`  saw ${inputs.length} distinct report shape(s)`);
+
+  await send({ connectedDevices: summaries, featureReads, inputReports: inputs });
+  log("done: the result was sent to the local server.");
+}
+
+function hex(v) {
+  return "0x" + (v >>> 0).toString(16).padStart(4, "0");
+}
+
+async function send(extra) {
+  const payload = Object.assign({
+    page: location.href,
+    userAgent: navigator.userAgent,
+    when: new Date().toISOString(),
+    secureContext: window.isSecureContext,
+    hidApiPresent: !!navigator.hid,
+    notes,
+  }, extra);
+
+  try {
+    const response = await fetch("/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      log(`warning: server returned ${response.status}`);
+    }
+  } catch (err) {
+    log(`warning: could not reach the local server: ${err}`);
+  }
+}
+
+document.getElementById("filtered").addEventListener("click", () => {
+  run(() => navigator.hid.requestDevice({
+    filters: [
+      { vendorId: 0x1d57, productId: 0xfa60 },
+      { vendorId: 0x1d57 },
+    ],
+  }));
+});
+
+document.getElementById("any").addEventListener("click", () => {
+  run(() => navigator.hid.requestDevice({ filters: [] }));
+});
+</script>
+</body>
+</html>

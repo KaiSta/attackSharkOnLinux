@@ -1,0 +1,7 @@
+# Local build and reverse-engineering scratch space. Only the README that
+# explains what is in it is tracked; everything else lives on one machine.
+/bin/*
+!/bin/README.md
+
+# Scratch left by editor and agent tooling.
+.freebuff/

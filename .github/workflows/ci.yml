@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# A superseded run on the same branch has nothing left to say.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The module's own directive, so the workflow cannot drift from it.
+          go-version-file: go.mod
+          cache: true
+
+      # The same three commands the README lists under Development, in the same
+      # order, so a green run here means a clean tree there.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "gofmt would reformat:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+      # The fuzz targets double as tests of their seed corpus, which the step
+      # above already runs. This step lets them look for new inputs. One target
+      # at a time: -fuzz only accepts a pattern matching a single target.
+      - name: fuzz each target briefly
+        run: |
+          for target in FuzzParseBattery FuzzParseStage FuzzIsStatus FuzzParseDPIStages; do
+            go test ./internal/mouse -run='^$' -fuzz="${target}" -fuzztime=10s
+          done
+          go test ./internal/trayapp -run='^$' -fuzz=FuzzLoadDPIStages -fuzztime=10s
+
+      - name: shell scripts parse
+        run: |
+          for script in tools/*.sh; do
+            bash -n "${script}"
+          done
