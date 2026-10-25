@@ -1,11 +1,33 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Dependabot version updates. Security updates are enabled in the repository
+# settings, not here; this file only schedules routine version bumps.
+#
+# Both ecosystems group their minor and patch bumps into one pull request. A
+# major version is left on its own, because it needs to be read against the
+# changelog rather than approved as part of a batch.
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  # go.mod and go.sum: fyne.io/systray, godbus/dbus and golang.org/x/sys.
+  - package-ecosystem: gomod
+    directory: "/"
     schedule:
-      interval: "weekly"
+      interval: weekly
+    groups:
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # The actions pinned in .github/workflows/ci.yml and release.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
