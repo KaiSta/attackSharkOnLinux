@@ -6,6 +6,11 @@ name: Release
 # VERSION, then tag that commit v<same version>:
 #
 #     git tag v0.1.0 && git push origin v0.1.0
+#
+# That tagged commit's message becomes the release notes, so write it for the
+# people who will read the release page rather than for the git history. Its
+# subject ("Release 1.2.3") is the release title already, so the body under it
+# is what gets published; GitHub's generated changelog link is not used.
 on:
   push:
     tags:
@@ -104,6 +109,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The notes come from the tagged commit, so this job needs the repository
+      # after all. Checking out the trigger ref means HEAD is the commit the tag
+      # points at, which is the only commit whose message describes this release.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -115,14 +125,26 @@ jobs:
       - name: create the release with both packages
         env:
           GH_TOKEN: ${{ github.token }}
-          # This job never checks out the repository, so gh has no git remote
-          # to infer the repository from and would fail before calling the API.
+          # gh has a git remote here, but naming the repository keeps it from
+          # depending on how the checkout was configured.
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
+          # The body under the subject is the release notes; a commit that only
+          # has a subject still gets a release page with that much on it, rather
+          # than an empty one.
+          notes="$(git log -1 --format=%b)"
+          if [[ -z "${notes//[[:space:]]/}" ]]; then
+            notes="$(git log -1 --format=%s)"
+          fi
+          printf '%s\n' "${notes}" > "${RUNNER_TEMP}/notes.md"
+
+          echo "release notes for ${TAG}:"
+          cat "${RUNNER_TEMP}/notes.md"
+
           ls -l dist
           gh release create "${TAG}" \
             --verify-tag \
             --title "${TAG}" \
-            --generate-notes \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
             dist/*.deb
