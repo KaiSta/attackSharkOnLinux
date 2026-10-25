@@ -43,6 +43,7 @@ import (
 	"attackshark-x11/internal/hidraw"
 	"attackshark-x11/internal/mouse"
 	"attackshark-x11/internal/notify"
+	"attackshark-x11/internal/pointerspeed"
 )
 
 // Options configures the application.
@@ -166,6 +167,17 @@ type app struct {
 	pollingItems  []*systray.MenuItem
 	itemDPIValue  *systray.MenuItem
 	dpiValueItems []*systray.MenuItem
+
+	// pointer is the desktop's pointer-speed setting, nil when this desktop
+	// keeps it somewhere this app cannot write. pointerMu covers the gsettings
+	// call, which must not run under a.mu: refresh takes that on every tick.
+	pointer         pointerSpeedBackend
+	pointerMu       sync.Mutex
+	pointerValue    float64
+	havePointer     bool
+	itemPointer     *systray.MenuItem
+	pointerItems    []*systray.MenuItem
+	lastPointerText string
 }
 
 // Run starts the tray application and blocks until it exits.
@@ -262,6 +274,29 @@ func (a *app) onReady() {
 		item := a.itemDPIValue.AddSubMenuItemCheckbox(
 			fmt.Sprintf("%d DPI", value), dpiValueItemTooltip(value), false)
 		a.dpiValueItems = append(a.dpiValueItems, item)
+	}
+
+	// The desktop's pointer speed. Not a mouse setting: the sensor's DPI is how
+	// far the mouse travels per inch, while this is how far the cursor moves
+	// for it. It lives in the desktop's own settings, so it also works with the
+	// receiver unplugged, and the tick follows what the desktop reports.
+	if backend, ok := pointerspeed.Detect(); ok {
+		a.pointer = backend
+		a.itemPointer = systray.AddMenuItem("Pointer speed",
+			pointerMenuTooltipText(backend.Desktop(), 0, false))
+		for _, value := range pointerspeed.Steps {
+			item := a.itemPointer.AddSubMenuItemCheckbox(
+				pointerspeed.Format(value), pointerItemTooltip(value), false)
+			a.pointerItems = append(a.pointerItems, item)
+		}
+		go a.startPointerSpeed()
+		go a.watchPointerSpeedClicks()
+	} else {
+		// No schema to write: say so once, rather than offering values that
+		// nothing on this desktop would read.
+		a.itemPointer = systray.AddMenuItem("Pointer speed: not available on this desktop",
+			"Changing the pointer speed needs the Cinnamon or GNOME mouse settings, and this desktop has neither.")
+		a.itemPointer.Disable()
 	}
 
 	systray.AddSeparator()
@@ -1231,13 +1266,15 @@ func formatAge(age time.Duration) string {
 }
 
 // setTitle replaces a label only when the text actually changed, so a freshness
-// that ticks every second does not rewrite the same string over D-Bus.
-func setTitle(item *systray.MenuItem, last *string, title string) {
+// that ticks every second does not rewrite the same string over D-Bus. It
+// reports whether the label changed, so callers can update a tooltip alongside.
+func setTitle(item *systray.MenuItem, last *string, title string) bool {
 	if item == nil || *last == title {
-		return
+		return false
 	}
 	item.SetTitle(title)
 	*last = title
+	return true
 }
 
 // refresh redraws the icon, tooltip and menu from the current state. The whole
@@ -1335,6 +1372,31 @@ func (a *app) refresh() {
 	}
 	for i, item := range a.dpiValueItems {
 		if haveDPI && currentDPI == dpiValueSteps[i] {
+			item.Check()
+		} else {
+			item.Uncheck()
+		}
+	}
+
+	// The pointer speed is the desktop's, not the device's, so there is no
+	// confirmation to wait for: the tick follows the value read back from it.
+	if a.itemPointer != nil {
+		switch {
+		case a.pointer == nil:
+			setTitle(a.itemPointer, &a.lastPointerText, "Pointer speed: not available on this desktop")
+		case !a.havePointer:
+			if setTitle(a.itemPointer, &a.lastPointerText, "Pointer speed: unknown") {
+				a.itemPointer.SetTooltip(pointerMenuTooltipText(a.pointer.Desktop(), 0, false))
+			}
+		default:
+			title := fmt.Sprintf("Pointer speed: %s", pointerspeed.Format(a.pointerValue))
+			if setTitle(a.itemPointer, &a.lastPointerText, title) {
+				a.itemPointer.SetTooltip(pointerMenuTooltipText(a.pointer.Desktop(), a.pointerValue, true))
+			}
+		}
+	}
+	for i, item := range a.pointerItems {
+		if a.havePointer && a.pointerValue == pointerspeed.Steps[i] {
 			item.Check()
 		} else {
 			item.Uncheck()

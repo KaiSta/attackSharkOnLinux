@@ -36,6 +36,7 @@ one self-contained binary.
 | Setting a stage's DPI value | **Yes**, from the **DPI value** menu in 2000 DPI steps, confirmed by the mouse |
 | Polling rate | **Yes**, read when the device opens; there is no announcement for it |
 | Changing the polling rate | **Yes**, from the **Polling rate** menu, confirmed by the mouse |
+| Pointer speed | **Yes** on Cinnamon and GNOME, from the **Pointer speed** menu — the desktop's setting, not the mouse's |
 
 The stage and polling rows carry caveats, so they get their own sections.
 
@@ -206,6 +207,32 @@ the same way as for a stage, by reading the rate back and comparing it. With
 confirmed, but switching still works.
 
 This unit reads 1000 Hz; the tooltip then ends with `- 1000 Hz polling`.
+
+### Pointer speed
+
+22000 DPI is only useful if the cursor is not unusable with it, so the menu has a
+**Pointer speed** submenu. It changes the desktop's own pointer speed — the same
+value the Mouse panel's speed slider writes — which the system applies to every
+pointing device through libinput, and which is remembered across logins.
+
+- `-1.00` is the slowest the desktop allows, `1.00` the fastest, `0.00` the
+  default; the menu offers 0.25 steps.
+- The value is read when the app starts, so the tick describes the desktop. A
+  value read between two steps (0.30, say) leaves every box empty and is still
+  named: `Pointer speed: 0.30`.
+- A click writes it with `gsettings` and then reads it back. The tick follows
+  the read-back, and a write that cannot be read back shows `Pointer speed:
+  unknown` rather than claiming the value that was asked for.
+- Like the polling rate, this setting has no notification of its own: a change
+  made in the desktop's Mouse panel afterwards is only noticed at the next
+  start of the tray.
+- It needs the Cinnamon or GNOME mouse settings schema. On another desktop the
+  entry is disabled and says so, because there is no portable way to set this.
+
+This is not the mouse's DPI, and it is not a mouse setting at all: the sensor
+decides how far the mouse travels per inch, while this decides how far the cursor
+moves for that movement. It works with the receiver unplugged, and it is shared
+with every other pointing device on the machine.
 
 ## Install
 
@@ -482,7 +509,8 @@ stage number, and points at `dpi` for the value behind it.
 
 `doctor` is the one to reach for when the tray shows nothing, or shows less than
 you expect. It checks the udev rule and its symlink, opens the receiver the way
-the app does and waits for one report, looks for the installed tray binary, and
+the app does and waits for one report, looks for the installed tray binary,
+reports whether the desktop has a pointer-speed setting the tray can use, and
 asks the session bus whether notifications have a daemon to reach. Each line is `ok`, `warn` or `FAIL`: a
 warning is something the app copes with (a missing symlink, a mouse that is
 asleep), a failure is something that stops it, and only failures make the command

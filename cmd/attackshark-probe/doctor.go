@@ -16,6 +16,7 @@ import (
 	"attackshark-x11/internal/hidraw"
 	"attackshark-x11/internal/mouse"
 	"attackshark-x11/internal/notify"
+	"attackshark-x11/internal/pointerspeed"
 )
 
 // Check statuses. A failure is something that stops the app from working; a
@@ -92,7 +93,7 @@ func runDoctor(args []string) error {
 		"how long to wait for a report when checking device access")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s\n\nusage: attackshark-probe doctor [flags]\n\n",
-			"Check the udev rule, device access, tray binary and session bus.")
+			"Check the udev rule, device access, tray binary, pointer speed and session bus.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -106,6 +107,7 @@ func runDoctor(args []string) error {
 	checkUdev(d)
 	checkDeviceAccess(d, *wait)
 	checkTrayBinary(d)
+	checkPointerSpeed(d)
 	checkSessionBus(d)
 	return d.finish()
 }
@@ -220,8 +222,10 @@ func accessHint(err error) string {
 	return "run 'attackshark-probe info' to see what was discovered"
 }
 
-// checkTrayBinary looks for the installed tray app and the autostart entry that
-// runs it. The probe works without either, so both are warnings.
+// checkTrayBinary looks for the installed tray app. The probe works without it,
+// so a missing binary is a warning. No startup entry is checked: neither route
+// installs one, because starting the tray with the session is the user's own
+// choice.
 func checkTrayBinary(d *doctor) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -241,33 +245,24 @@ func checkTrayBinary(d *doctor) {
 		d.add("tray binary", statusWarn, "not installed",
 			"install it with:  tools/install.sh   (or package it:  make package)")
 	}
+}
 
-	// An autostart entry can live in two places: the per-user one that
-	// tools/install.sh writes, or the system-wide one the .deb installs, which
-	// applies to every user of the machine. Both start the tray, so both count.
-	userEntry := filepath.Join(home, ".config", "autostart", "attackshark-x11-tray.desktop")
-	systemEntry := "/etc/xdg/autostart/attackshark-x11-tray.desktop"
-	switch {
-	case isRegularFile(userEntry):
-		d.add("autostart", statusOK, userEntry)
-	case isRegularFile(systemEntry):
-		d.add("autostart", statusOK, systemEntry+" (system-wide)")
-	default:
-		d.add("autostart", statusWarn, userEntry+" is missing",
-			"the tray will not start with the session; tools/install.sh writes it, or install the .deb from make package")
+// checkPointerSpeed reports whether the tray's Pointer speed menu can work. It
+// depends on a desktop settings schema, not on the mouse, so a desktop without
+// one is worth saying rather than failing: the rest of the app is unaffected.
+func checkPointerSpeed(d *doctor) {
+	if backend, ok := pointerspeed.Detect(); ok {
+		d.add("pointer speed", statusOK, backend.Desktop()+" mouse settings")
+		return
 	}
+	d.add("pointer speed", statusWarn,
+		"no Cinnamon or GNOME mouse settings on this desktop",
+		"the tray disables its Pointer speed menu; the mouse is unaffected")
 }
 
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
-}
-
-// isRegularFile is used for the autostart entry, which the desktop only has to
-// read: requiring the executable bit there would warn about a file that works.
-func isRegularFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }
 
 // checkSessionBus reports whether low-battery notifications have anywhere to go.
