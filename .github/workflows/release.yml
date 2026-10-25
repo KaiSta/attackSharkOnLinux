@@ -115,6 +115,9 @@ jobs:
       - name: create the release with both packages
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks out the repository, so gh has no git remote
+          # to infer the repository from and would fail before calling the API.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           ls -l dist
