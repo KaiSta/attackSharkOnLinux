@@ -91,7 +91,7 @@ jobs:
           test "$(dpkg-deb -f "${deb}" Architecture)" = "${GOARCH}"
           dpkg-deb --info "${deb}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: dist/*.deb
