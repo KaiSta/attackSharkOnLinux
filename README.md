@@ -209,8 +209,8 @@ This unit reads 1000 Hz; the tooltip then ends with `- 1000 Hz polling`.
 
 ## Install
 
-Two steps: device access, then the package. Building needs Go 1.24+ (the version
-in `go.mod`), `make`, and `dpkg-deb` for the package itself.
+One step: build the package and install it. That needs Go 1.24+ (the version in
+`go.mod`), `make`, and `dpkg-deb`.
 
 ```make
 make build       # both binaries into bin/, no root, nothing else touched
@@ -219,25 +219,7 @@ make package     # dist/attackshark-x11_<version>_<arch>.deb, needs dpkg-deb
 make help        # the same list, plus VERSION=, ARCH= and other variables
 ```
 
-### 1. Device access
-
-```bash
-sudo tools/install-udev.sh
-```
-
-This installs [udev/99-attackshark-x11.rules](udev/99-attackshark-x11.rules)
-into `/etc/udev/rules.d`, reloads udev and then checks the things that most often
-go wrong: whether `/dev/attackshark-x11` appeared, and whether the user who ran
-`sudo` is actually in `plugdev`. It is required — `/dev/hidraw*` is
-`root:root 0600`, so without a rule the app cannot open the receiver at all —
-and it is enough on its own for a source checkout.
-
-The `.deb` also carries the rule (at `/usr/lib/udev/rules.d`, where a package's
-files belong), so a package install works even if this step was skipped. Running
-it first is still the documented path: it is the only thing that verifies the
-group membership of the actual user, which a package cannot do for you.
-
-### 2. The package
+### The package
 
 ```bash
 make package
@@ -245,9 +227,10 @@ sudo apt install ./dist/attackshark-x11_*.deb
 ```
 
 `apt` rather than `dpkg -i`, so `libc6` and `udev` are resolved for you. The
-package puts both binaries in `/usr/bin`, the rule in `/usr/lib/udev/rules.d`
-and its own copy of the docs in `/usr/share/doc/attackshark-x11`. `postinst`
-reloads udev and warns if `plugdev` does not exist.
+package puts both binaries in `/usr/bin`, the udev rule in
+`/usr/lib/udev/rules.d`, and the docs in `/usr/share/doc/attackshark-x11`;
+`postinst` reloads udev, so device access works straight away without a reboot
+or a second command.
 
 Nothing is started for you. Check the path and start it:
 
@@ -255,6 +238,21 @@ Nothing is started for you. Check the path and start it:
 attackshark-probe doctor
 attackshark-x11-tray -v
 ```
+
+### If the tray cannot open the receiver
+
+`attackshark-probe doctor` names the check that failed. The usual cause is that
+your user is not in the `plugdev` group the rule grants access to, and fixing
+the group is something no package can do on your behalf:
+
+```bash
+sudo tools/install-udev.sh
+```
+
+It installs the same rule into `/etc/udev/rules.d` (where it takes precedence
+over the packaged copy), reloads udev, reports whether `/dev/attackshark-x11`
+appeared, and tells you when your user needs adding to `plugdev` (then log out
+and back in). It is also what a source install uses instead of the package.
 
 ### Starting it with the session is your call
 
@@ -299,8 +297,10 @@ make install          # both binaries into ~/.local/bin, plus the docs
 make uninstall        # undo that
 ```
 
-This needs no root and writes no startup entry. It is an alternative to the
-package rather than a layer on top of it: install both and `~/.local/bin`
+The install itself needs no root, and writes no startup entry. Device access is
+the one privileged step, because nothing here carries the rule for you:
+`sudo tools/install-udev.sh` once, as described above. This is an alternative to
+the package rather than a layer on top of it: install both and `~/.local/bin`
 shadows `/usr/bin` on most `PATH`s.
 
 ### Undoing either install

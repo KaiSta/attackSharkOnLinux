@@ -240,20 +240,23 @@ help:
 		'' \
 		'installing:' \
 		'' \
-		'  1. sudo tools/install-udev.sh   device access, once, and before the tray' \
-		'                                  will see the mouse' \
-		'  2. make package                 build dist/attackshark-x11_<version>_<arch>.deb' \
-		'     sudo apt install ./dist/attackshark-x11_*.deb' \
+		'  make package' \
+		'  sudo apt install ./dist/attackshark-x11_*.deb' \
+		'' \
+		'  The package carries the udev rule and postinst reloads udev, so device' \
+		'  access works without a second command. If the tray cannot open the' \
+		'  receiver, tools/install-udev.sh installs the same rule into /etc, reloads' \
+		'  udev and checks that your user is in plugdev - the part a package cannot' \
+		'  do for you.' \
 		'' \
 		'  make install does the same for a source checkout: per-user, no root, into' \
-		'  ~/.local/bin. The package and that are alternatives rather than layers -' \
-		'  install both and ~/.local/bin shadows /usr/bin on most PATHs, while the' \
-		'  single-instance lock means the loser exits quietly instead of drawing a' \
-		'  second tray icon.' \
+		'  ~/.local/bin, and needs tools/install-udev.sh once for device access. The' \
+		'  package and that are alternatives rather than layers - install both and' \
+		'  ~/.local/bin shadows /usr/bin on most PATHs, while the single-instance' \
+		'  lock means the loser exits quietly instead of drawing a second tray icon.' \
 		'' \
 		'  Neither route starts the tray with your session. That is yours to set up:' \
-		'  add /usr/bin/attackshark-x11-tray (or ~/.local/bin/attackshark-x11-tray)' \
-		'  to your desktop'\''s startup applications, or copy' \
+		'  add the tray binary to your desktop'\''s startup applications, or copy' \
 		'  systemd/attackshark-x11-tray.service into ~/.config/systemd/user.' \
 		'' \
 		'README.md has the full story, including why the rule looks the way it does.'
