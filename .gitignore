@@ -3,5 +3,9 @@
 /bin/*
 !/bin/README.md
 
+# Output of `make package`: the .deb and the tree it is staged in. Both are
+# rebuilt from scratch every run, so neither is worth keeping.
+/dist/*
+
 # Scratch left by editor and agent tooling.
 .freebuff/

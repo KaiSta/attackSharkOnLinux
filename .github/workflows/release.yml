@@ -1,0 +1,125 @@
+name: Release
+
+# A version tag is the only thing that publishes a release. The tag and the
+# VERSION file must agree, so a mistyped tag fails here rather than shipping a
+# package whose control file says a different version. Push a commit that bumps
+# VERSION, then tag that commit v<same version>:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Never cancel a release halfway through: the tag will not be pushed twice.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: check tag against VERSION
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: read
+        name: the tag names the version in VERSION
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          tag="${GITHUB_REF_NAME}"
+          if [[ -z "${version}" ]]; then
+            echo "VERSION is empty; it must contain the version to build" >&2
+            exit 1
+          fi
+          if [[ "${tag#v}" != "${version}" ]]; then
+            echo "tag ${tag} does not match VERSION (${version})" >&2
+            echo "bump VERSION or tag the commit that carries the right one" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "releasing ${tag}"
+
+  package:
+    name: .deb (${{ matrix.arch }})
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      # One architecture failing should not hide the other one's result.
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The workflow only ever runs on a tag, but passing the version
+      # explicitly keeps make from consulting git or the VERSION file again and
+      # makes the job's inputs visible in its log.
+      #
+      # CGO_ENABLED=0 is what lets one x86 runner build the arm64 package: the
+      # tray app and the probe are pure Go, so the binary is statically linked
+      # and no cross toolchain is needed.
+      - name: build the package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: make package VERSION="${VERSION}" GOARCH="${GOARCH}"
+
+      # dpkg-deb is the authority on what was built, so ask it rather than
+      # trusting the filename make chose.
+      - name: check what was built
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          deb="dist/attackshark-x11_${VERSION}_${GOARCH}.deb"
+          test -f "${deb}"
+          test "$(dpkg-deb -f "${deb}" Version)" = "${VERSION}"
+          test "$(dpkg-deb -f "${deb}" Architecture)" = "${GOARCH}"
+          dpkg-deb --info "${deb}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  release:
+    name: publish the release
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # --verify-tag fails if the tag is gone from the remote, and gh itself
+      # refuses to create a release that already exists, so a re-run cannot
+      # silently move a published version to a newer build.
+      - name: create the release with both packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          ls -l dist
+          gh release create "${TAG}" \
+            --verify-tag \
+            --title "${TAG}" \
+            --generate-notes \
+            dist/*.deb

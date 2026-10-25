@@ -53,8 +53,13 @@ jobs:
           done
           go test ./internal/trayapp -run='^$' -fuzz=FuzzLoadDPIStages -fuzztime=10s
 
+      # The Debian maintainer scripts have no .sh suffix (dpkg does not use
+      # one), so they are named explicitly rather than matched.
       - name: shell scripts parse
         run: |
-          for script in tools/*.sh; do
+          for script in tools/*.sh packaging/postinst packaging/postrm; do
             bash -n "${script}"
           done
+
+      - name: the debian package builds
+        run: make package VERSION=0.0.0+ci

@@ -20,7 +20,7 @@ on:
 | `autostart-run.log`, `freshness-run.log`, `tray-run.log` | runs of the app itself |
 | `reference-shark.jpg`, `reference-shark2.jpg` | fin silhouettes the icon shape was compared against |
 | `icon-preview.html`, `icon-sheet.png`, `icon-states.png`, `reference-preview.html` | icon rendering iterations, as produced by `cmd/attackshark-icons` |
-| `attackshark-*` | locally built binaries; regenerate with `go build -o bin/... ./cmd/...` |
+| `attackshark-*` | locally built binaries; regenerate with `make build`. `make clean` removes these and `dist/`, and deliberately nothing else in this directory. |
 
 Captured logs and JSON contain timestamps, device paths and USB identifiers from
 the machine they were taken on. They are kept for provenance, not as test

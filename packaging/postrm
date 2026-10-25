@@ -1,0 +1,44 @@
+#!/bin/sh
+# Debian maintainer script, run after the package's files are removed.
+#
+# Nothing here removes anything: dpkg has already done that. Two things do need
+# saying out loud, because both look like the package failed to clean up after
+# itself when in fact they are dpkg behaving as documented.
+set -e
+
+case "$1" in
+remove | purge)
+    # The udev rule went with the package, so reload now rather than let a stale
+    # rule stay loaded until the next boot. The /dev/attackshark-x11 symlink that
+    # rule created is dropped by udev on the same reload; if it lingers, it is
+    # harmless and disappears at the next replug or reboot.
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+        udevadm trigger --action=add --subsystem-match=hidraw || true
+        udevadm settle || true
+    fi
+
+    # The autostart entry is a conffile, so "remove" keeps it - along with any
+    # edit made to it - while "purge" deletes it. An entry left pointing at a
+    # binary that is no longer installed fails silently in a way that is very
+    # hard to place, so it is worth a line here.
+    if [ "$1" = remove ] && [ -e /etc/xdg/autostart/attackshark-x11-tray.desktop ]; then
+        echo "attackshark-x11: /etc/xdg/autostart/attackshark-x11-tray.desktop is a" >&2
+        echo "  conffile, so removing the package kept it. Purge the package, or delete" >&2
+        echo "  that file, or it will keep starting a binary that is not installed." >&2
+    fi
+
+    # A tray app belonging to a logged-in user is not dpkg's to kill, and the
+    # icon keeps working until they log out. Better to say so than to look like
+    # a removal that did not take effect.
+    #
+    # pgrep -f, not -x: the kernel keeps 15 characters of a process name, so
+    # "attackshark-x11-tray" can never match -x and this check would silently do
+    # nothing. The brackets are the usual trick for a pattern that must not
+    # match the command line it appears in.
+    if command -v pgrep >/dev/null 2>&1 && pgrep -f 'attackshark-x11-tra[y]' >/dev/null 2>&1; then
+        echo "attackshark-x11: a running tray app is left alone; it exits at logout," >&2
+        echo "  or right-click the icon and choose Quit." >&2
+    fi
+    ;;
+esac

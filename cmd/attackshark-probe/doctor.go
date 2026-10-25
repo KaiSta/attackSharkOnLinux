@@ -259,24 +259,40 @@ func checkTrayBinary(d *doctor) {
 	case isExecutable(installed):
 		d.add("tray binary", statusOK, installed)
 	case err == nil:
+		// A .deb install puts the binary in /usr/bin, which is on PATH, so
+		// this is also how a package install is recognised as present.
 		d.add("tray binary", statusOK, found+" (from PATH)")
 	default:
 		d.add("tray binary", statusWarn, "not installed",
-			"install it with:  tools/install.sh")
+			"install it with:  tools/install.sh   (or package it:  make package)")
 	}
 
-	entry := filepath.Join(home, ".config", "autostart", "attackshark-x11-tray.desktop")
-	if _, err := os.Stat(entry); err == nil {
-		d.add("autostart", statusOK, entry)
-	} else {
-		d.add("autostart", statusWarn, entry+" is missing",
-			"the tray will not start with the session; tools/install.sh writes it")
+	// An autostart entry can live in two places: the per-user one that
+	// tools/install.sh writes, or the system-wide one the .deb installs, which
+	// applies to every user of the machine. Both start the tray, so both count.
+	userEntry := filepath.Join(home, ".config", "autostart", "attackshark-x11-tray.desktop")
+	systemEntry := "/etc/xdg/autostart/attackshark-x11-tray.desktop"
+	switch {
+	case isRegularFile(userEntry):
+		d.add("autostart", statusOK, userEntry)
+	case isRegularFile(systemEntry):
+		d.add("autostart", statusOK, systemEntry+" (system-wide)")
+	default:
+		d.add("autostart", statusWarn, userEntry+" is missing",
+			"the tray will not start with the session; tools/install.sh writes it, or install the .deb from make package")
 	}
 }
 
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+// isRegularFile is used for the autostart entry, which the desktop only has to
+// read: requiring the executable bit there would warn about a file that works.
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // checkSessionBus reports whether low-battery notifications have anywhere to go.

@@ -132,8 +132,23 @@ belongs in a tool whose whole value is that it never lies to you.
 
 ## Install
 
-Needs Go 1.24+ (the version in `go.mod`) and, once, one privileged step for
-device access.
+Needs Go 1.24+ (the version in `go.mod`) and `make`, which wraps the scripts
+below rather than replacing them.
+
+```make
+make build       # both binaries into bin/, no root, nothing else touched
+make check       # gofmt -l, go vet and go test: the same three CI runs
+make install     # per-user: ~/.local/bin, autostart entry, docs, dpi.conf template
+make package     # dist/attackshark-x11_<version>_<arch>.deb, needs dpkg-deb
+make uninstall   # undo the per-user install
+make help        # the same list, plus VERSION=, ARCH= and UNINSTALL_ARGS=
+```
+
+There are two ways to install, and they are alternatives rather than layers. A
+per-user install from source needs one privileged step for device access; the
+package does that step for you, for every user on the machine.
+
+### From source, for one user
 
 ```bash
 # 1. Device access (once). Needs root, changes nothing else on the system.
@@ -141,7 +156,7 @@ sudo tools/install-udev.sh
 
 # 2. Build and install for your user: both binaries into ~/.local/bin, an
 #    autostart entry, the docs, and a template at ~/.config/attackshark-x11/dpi.conf.
-tools/install.sh
+make install
 
 # 3. Check the whole path, including whatever step 1 could have got wrong.
 attackshark-probe doctor
@@ -153,20 +168,63 @@ Then start it now, or log out and back in:
 ~/.local/bin/attackshark-x11-tray -v
 ```
 
-`doctor` is the quickest way to tell an installation problem from a mouse that is
-simply asleep: it prints one line per check and exits non-zero only when
-something actually stops the app from working.
+### As a Debian package, for every user
 
-Undo everything:
+```bash
+make package
+sudo apt install ./dist/attackshark-x11_*.deb
+```
+
+`apt` rather than `dpkg -i`, so `libc6` and `udev` are resolved for you. The
+package puts both binaries in `/usr/bin`, the udev rule in
+`/usr/lib/udev/rules.d`, its own copy of the docs in
+`/usr/share/doc/attackshark-x11`, and an autostart entry in
+`/etc/xdg/autostart` that starts the tray for every user at their next login.
+**Step 1 above is therefore not needed**: `postinst` loads the rule itself, and
+says so if it could not.
+
+Four things about the package are deliberate:
+
+- **It ships no `dpi.conf`.** The per-stage DPI values belong to your mouse, so
+  there is no file under `/etc` for anyone to inherit. The menu's "Open DPI
+  config" writes the annotated template into the user's own config directory on
+  first use, and `/usr/share/doc/attackshark-x11/dpi.conf.example` is the same
+  file to copy by hand.
+- **The autostart entry is a conffile.** Editing it is legitimate, so an upgrade
+  does not overwrite your version. A plain `dpkg -r` therefore *keeps* it, and
+  `postrm` says so, because an entry left pointing at a binary that is no longer
+  installed is hard to place. `dpkg --purge` removes it.
+- **The version comes from the `VERSION` file.** It holds the version the next
+  release is built as, and `make package` reads it. A release is a `v*` tag
+  matching that file (`v0.1.0` for `0.1.0`), which builds `amd64` and `arm64`
+  packages and attaches both to the GitHub release. `make package VERSION=1.2.3`
+  overrides the file for a one-off build; with no file it falls back to
+  `git describe --tags --always`, rewritten into something dpkg accepts.
+- **Nothing in it writes to the mouse**, exactly as the binaries it contains.
+
+### Undoing either install
 
 ```bash
 tools/uninstall.sh                   # binaries, autostart entry, installed docs
 tools/uninstall.sh --purge           # also dpi.conf and the remembered stage
 sudo tools/uninstall.sh --with-udev  # also the udev rule in /etc
+sudo tools/uninstall.sh --with-package   # also a system-wide .deb install
 ```
+
+`make uninstall` runs that script, and `make uninstall UNINSTALL_ARGS=--purge`
+passes the flag through. The two root-only flags are checked before anything is
+removed, so forgetting `sudo` fails with a message instead of leaving a
+half-removed installation, and the script removes the *invoking* user's files
+when run through `sudo` rather than looking in root's home directory.
 
 Your `dpi.conf` and the remembered stage survive a plain `uninstall.sh` on
 purpose: they describe your mouse, and nothing can regenerate them.
+
+`doctor` is the quickest way to tell an installation problem from a mouse that is
+simply asleep: it prints one line per check and exits non-zero only when
+something actually stops the app from working. It recognises both installs, so
+either `/usr/bin/attackshark-x11-tray` from the package or
+`~/.local/bin/attackshark-x11-tray` from the source install counts as present.
 
 ### The udev rule, and why it looks the way it does
 
@@ -452,8 +510,17 @@ go vet ./...
 gofmt -l .
 ```
 
+`make check` runs those three in that order, and fails on unformatted code rather
+than printing a list to ignore. The `Makefile` is a wrapper: `make install` and
+`make uninstall` call `tools/install.sh` and `tools/uninstall.sh` so that the
+per-user layout is described in one place, and only `make package` has a layout
+of its own, because a package installs to `/usr` instead of a home directory.
+
 `.github/workflows/ci.yml` runs those three on every push and pull request, plus
-a shell syntax check and a ten-second run of each fuzz target. The parsers are
+a shell syntax check and a ten-second run of each fuzz target.
+`.github/workflows/release.yml` runs on a `v*` tag: it checks that the tag names
+the version in `VERSION`, then builds the `amd64` and `arm64` packages and
+attaches both to the GitHub release. The parsers are
 fuzzed as well as unit tested, because a byte stream from the mouse and a config
 file written by hand are both untrusted input:
 

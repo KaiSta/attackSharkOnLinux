@@ -1,0 +1,51 @@
+#!/bin/sh
+# Debian maintainer script, run after the package's files are unpacked.
+#
+# The one thing that has to happen here is loading the udev rule the package
+# installs. /dev/hidraw* is crw------- root root by default, so until that rule
+# is loaded the tray app starts, finds the receiver, and is not allowed to open
+# it. The rule grants access with GROUP="plugdev" and TAG+="uaccess"; the rule
+# file itself explains why it needs both.
+set -e
+
+# dpkg calls this with "configure" when installing or upgrading, and with
+# "abort-*" if something later in the same transaction fails. Only the first
+# needs anything, and a maintainer script that exits non-zero would abort the
+# whole dpkg run, so every udevadm call below is allowed to fail.
+if [ "$1" != configure ]; then
+    exit 0
+fi
+
+reloaded=1
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || reloaded=0
+    # The "add" action rather than the default "change", which does not
+    # re-evaluate a device against a newly installed rule. Only hidraw is
+    # triggered, so no other device on the system is disturbed by this.
+    udevadm trigger --action=add --subsystem-match=hidraw || reloaded=0
+    udevadm settle || true
+else
+    reloaded=0
+fi
+
+if [ "$reloaded" -eq 1 ]; then
+    echo "attackshark-x11: udev rule installed and loaded." >&2
+else
+    echo "attackshark-x11: udev rule installed, but reloading udev did not work." >&2
+    echo "  The rule takes effect at the next boot. To load it now:" >&2
+    echo "    sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=hidraw" >&2
+fi
+
+# The rule hands access to a group, so a system without that group gets a rule
+# that silently grants nothing. Worth saying here rather than leaving it to be
+# discovered as "the tray cannot see my mouse".
+if command -v getent >/dev/null 2>&1 && ! getent group plugdev >/dev/null 2>&1; then
+    echo "attackshark-x11: the group 'plugdev' does not exist, so the installed" >&2
+    echo "  udev rule grants access to nobody. Either create it and add your users," >&2
+    echo "  or change GROUP= in /usr/lib/udev/rules.d/99-attackshark-x11.rules." >&2
+fi
+
+# No configuration is needed for the tray to start working, so this says only
+# where to look if the icon never appears.
+echo "attackshark-x11: the tray app appears in the panel at your next login." >&2
+echo "attackshark-x11: check device access now with: attackshark-probe doctor" >&2
