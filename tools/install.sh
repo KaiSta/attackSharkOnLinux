@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # Build the tray app and the probe, and install both for the current user, with
-# an autostart entry and a template at ~/.config/attackshark-x11/dpi.conf.
+# the documentation. Nothing starts the app with the session: that is the user's
+# own choice, made in their desktop's startup settings or with the systemd unit
+# in systemd/.
 #
 # No root is needed here. Device access is the one privileged step, and it is
 # separate and one-off:
@@ -13,10 +15,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${HOME}/.local/bin"
-AUTOSTART_DIR="${HOME}/.config/autostart"
 DOC_DIR="${HOME}/.local/share/doc/attackshark-x11"
 RULE="/etc/udev/rules.d/99-attackshark-x11.rules"
-DESKTOP_NAME="attackshark-x11-tray.desktop"
 TRAY="${BIN_DIR}/attackshark-x11-tray"
 PROBE="${BIN_DIR}/attackshark-probe"
 
@@ -28,9 +28,11 @@ Builds and installs, for the current user only:
 
   ~/.local/bin/attackshark-x11-tray                  the tray app
   ~/.local/bin/attackshark-probe                     the diagnostic tool
-  ~/.config/autostart/attackshark-x11-tray.desktop   starts it with the session
-  ~/.config/attackshark-x11/dpi.conf                 template, if not there yet
   ~/.local/share/doc/attackshark-x11/README.md       documentation
+
+No autostart entry is written. Start the tray from your desktop's startup
+applications, or copy systemd/attackshark-x11-tray.service into
+~/.config/systemd/user.
 
 No root is needed. Device access is the one privileged step, and it is separate:
 
@@ -62,35 +64,10 @@ go build -o "${PROBE}" ./cmd/attackshark-probe
 echo "installed binary    ${TRAY}"
 echo "installed binary    ${PROBE}"
 
-mkdir -p "${AUTOSTART_DIR}"
-cat > "${AUTOSTART_DIR}/${DESKTOP_NAME}" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Attack Shark X11 tray
-Comment=Battery level and DPI stage for the Attack Shark X11 mouse
-Exec=${TRAY}
-Terminal=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-EOF
-
-echo "installed autostart ${AUTOSTART_DIR}/${DESKTOP_NAME}"
-
 # Referenced by Documentation= in systemd/attackshark-x11-tray.service.
 mkdir -p "${DOC_DIR}"
 install -m 0644 README.md "${DOC_DIR}/README.md"
 echo "installed docs      ${DOC_DIR}/README.md"
-
-# Annotated template for the per-stage DPI values. Never overwrites an existing
-# file, because those values belong to the user's mouse.
-DPI_CONF="${XDG_CONFIG_HOME:-${HOME}/.config}/attackshark-x11/dpi.conf"
-mkdir -p "$(dirname "${DPI_CONF}")"
-if [[ -e "${DPI_CONF}" ]]; then
-    echo "kept existing       ${DPI_CONF}"
-else
-    install -m 0644 examples/dpi.conf "${DPI_CONF}"
-    echo "installed template  ${DPI_CONF}"
-fi
 
 # The rule itself needs root, so it is not installed here. Saying so now is
 # better than a permission error from the tray later.
@@ -113,8 +90,11 @@ esac
 
 echo
 echo "Next:"
-echo "  ${PROBE} doctor        # checks udev, device access, config and the session"
-echo "  log out and back in, or run: ${TRAY}"
+echo "  ${PROBE} doctor        # checks udev, device access and the session"
+echo "  ${TRAY}   # start it now; nothing starts it with the session"
 echo
-echo "Until ${DPI_CONF} holds your six DPI values, the tray"
-echo "shows the stage as \"stage N of 6\" without inventing a number to go with it."
+echo "The tray reads the per-stage DPI values, the stage the mouse has selected"
+echo "and its polling rate when it starts, using the firmware's 0xA0 permission"
+echo "request. If that read fails, the stage shows as \"stage N of 6\" with no"
+echo "invented number. Pick a stage from the tray's DPI stages menu, a value from"
+echo "its DPI value menu, or a rate from its Polling rate menu, to change the mouse."

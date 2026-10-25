@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 #
-# Undo tools/install.sh: remove the per-user binaries, the autostart entry and
-# the installed documentation.
-#
-# Your DPI values and the remembered DPI stage are kept unless --purge is given,
-# because they describe your mouse and nothing can regenerate them.
+# Undo tools/install.sh: remove the per-user binaries and the installed
+# documentation.
 #
 #     tools/uninstall.sh                    # whatever install.sh created
-#     tools/uninstall.sh --purge            # also dpi.conf and the saved stage
 #     sudo tools/uninstall.sh --with-udev   # also the udev rule in /etc
 #
 # A system-wide install made from the .deb (see `make package`) is a dpkg
@@ -16,8 +12,7 @@
 #     sudo tools/uninstall.sh --with-package
 #
 # The udev rule and the package are system files, so they need root and are
-# never touched unless the matching flag is passed: --purge on its own stays
-# inside your home directory.
+# never touched unless the matching flag is passed.
 set -euo pipefail
 
 # Under sudo, HOME is root's, so every path below would point at /root and this
@@ -32,36 +27,27 @@ if [[ -n "${SUDO_USER:-}" ]] && command -v getent >/dev/null 2>&1; then
 fi
 
 BIN_DIR="${TARGET_HOME}/.local/bin"
-AUTOSTART_DIR="${TARGET_HOME}/.config/autostart"
 DOC_DIR="${TARGET_HOME}/.local/share/doc/attackshark-x11"
-CONFIG_DIR="${XDG_CONFIG_HOME:-${TARGET_HOME}/.config}/attackshark-x11"
-STATE_DIR="${XDG_STATE_HOME:-${TARGET_HOME}/.local/state}/attackshark-x11"
-DESKTOP_NAME="attackshark-x11-tray.desktop"
 RULE="/etc/udev/rules.d/99-attackshark-x11.rules"
 SYMLINK="/dev/attackshark-x11"
 
 # The system-wide install, as packaged by `make package`.
 PACKAGE_NAME="attackshark-x11"
 PACKAGE_BIN="/usr/bin/attackshark-x11-tray"
-PACKAGE_AUTOSTART="/etc/xdg/autostart/attackshark-x11-tray.desktop"
 
-PURGE=0
 WITH_UDEV=0
 WITH_PACKAGE=0
 
 usage() {
     cat <<'EOF'
-usage: tools/uninstall.sh [--purge] [--with-udev] [--with-package]
+usage: tools/uninstall.sh [--with-udev] [--with-package]
 
 Removes what tools/install.sh installed for the current user:
 
   ~/.local/bin/attackshark-x11-tray
   ~/.local/bin/attackshark-probe
-  ~/.config/autostart/attackshark-x11-tray.desktop
   ~/.local/share/doc/attackshark-x11/
 
---purge         also remove ~/.config/attackshark-x11/dpi.conf and the saved DPI
-                stage. Both describe your mouse; nothing can regenerate them.
 --with-udev     also remove the udev rule from /etc. Needs root: run it through
                 sudo. The /dev symlink goes with it on the next udev reload.
 --with-package  also purge a system-wide install made from the .deb that
@@ -78,7 +64,6 @@ EOF
 
 for arg in "$@"; do
     case "${arg}" in
-        --purge) PURGE=1 ;;
         --with-udev) WITH_UDEV=1 ;;
         --with-package) WITH_PACKAGE=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -132,27 +117,8 @@ fi
 
 remove_file "${BIN_DIR}/attackshark-x11-tray"
 remove_file "${BIN_DIR}/attackshark-probe"
-remove_file "${AUTOSTART_DIR}/${DESKTOP_NAME}"
 remove_file "${DOC_DIR}/README.md"
 prune_dir "${DOC_DIR}"
-
-if [[ "${PURGE}" -eq 1 ]]; then
-    remove_file "${CONFIG_DIR}/dpi.conf"
-    prune_dir "${CONFIG_DIR}"
-    remove_file "${STATE_DIR}/stage"
-    prune_dir "${STATE_DIR}"
-else
-    kept=0
-    for path in "${CONFIG_DIR}/dpi.conf" "${STATE_DIR}/stage"; do
-        if [[ -e "${path}" ]]; then
-            echo "kept     ${path}"
-            kept=1
-        fi
-    done
-    if [[ "${kept}" -eq 1 ]]; then
-        echo "         (--purge removes these as well)"
-    fi
-fi
 
 # Root was already established above if this flag was given.
 if [[ "${WITH_UDEV}" -eq 1 ]]; then
@@ -177,8 +143,7 @@ fi
 # Root was already established above if this flag was given.
 if [[ "${WITH_PACKAGE}" -eq 1 ]]; then
     if package_installed; then
-        # --purge rather than -r on purpose: the autostart entry in /etc is a
-        # conffile, and one left behind keeps starting a binary that is gone.
+        # --purge rather than -r, so nothing the package owns is left behind.
         dpkg --purge "${PACKAGE_NAME}"
     else
         echo "kept     the ${PACKAGE_NAME} package (not installed)"
@@ -188,7 +153,6 @@ elif package_installed; then
     # install looks like an uninstall that did not work.
     echo "note     the ${PACKAGE_NAME} package is installed system-wide:"
     echo "           ${PACKAGE_BIN}"
-    echo "           ${PACKAGE_AUTOSTART}"
     echo "         sudo $0 --with-package   removes it"
 fi
 

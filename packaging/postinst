@@ -45,7 +45,9 @@ if command -v getent >/dev/null 2>&1 && ! getent group plugdev >/dev/null 2>&1; 
     echo "  or change GROUP= in /usr/lib/udev/rules.d/99-attackshark-x11.rules." >&2
 fi
 
-# No configuration is needed for the tray to start working, so this says only
-# where to look if the icon never appears.
-echo "attackshark-x11: the tray app appears in the panel at your next login." >&2
+# The package deliberately adds no startup entry, so this is the one thing a new
+# user has to know: the binary is installed but nothing runs it yet.
+echo "attackshark-x11: the tray app is installed but is not started automatically." >&2
+echo "  Start it with 'attackshark-x11-tray', or add that command to your" >&2
+echo "  desktop's startup applications so it runs with the session." >&2
 echo "attackshark-x11: check device access now with: attackshark-probe doctor" >&2

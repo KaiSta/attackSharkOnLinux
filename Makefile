@@ -2,7 +2,7 @@
 #
 #   make build       the binaries into bin/, which .gitignore excludes
 #   make check       gofmt, go vet and go test - the same three CI runs
-#   make install     per-user install: ~/.local/bin, autostart entry, docs
+#   make install     per-user install: ~/.local/bin and docs
 #   make package     build dist/attackshark-x11_<version>_<arch>.deb
 #   make uninstall   undo make install
 #   make help        all of the above, plus the variables that change them
@@ -61,8 +61,8 @@ fmt:
 # --- install ------------------------------------------------------------------
 
 # Per-user and unprivileged: install.sh builds both binaries itself and writes
-# the autostart entry, the documentation and a dpi.conf template. Device access
-# is the one privileged step and is deliberately separate:
+# the documentation. Device access is the one privileged step and is deliberately
+# separate:
 #
 #     sudo tools/install-udev.sh
 #
@@ -86,7 +86,6 @@ PKG_NAME := attackshark-x11
 PKG_DIR  := $(DIST_DIR)/$(PKG_NAME)
 PKG_BIN  := $(PKG_DIR)/usr/bin
 PKG_UDEV := $(PKG_DIR)/usr/lib/udev/rules.d
-PKG_AUTO := $(PKG_DIR)/etc/xdg/autostart
 PKG_DOC  := $(PKG_DIR)/usr/share/doc/$(PKG_NAME)
 
 # The upstream version dpkg will record, in the order it is decided:
@@ -156,7 +155,7 @@ package: build
 		exit 1; \
 	}
 	rm -rf '$(PKG_DIR)'
-	install -d '$(PKG_DIR)/DEBIAN' $(PKG_BIN) $(PKG_UDEV) $(PKG_AUTO) $(PKG_DOC)
+	install -d '$(PKG_DIR)/DEBIAN' $(PKG_BIN) $(PKG_UDEV) $(PKG_DOC)
 
 	install -m 0755 $(TRAY) '$(PKG_BIN)/attackshark-x11-tray'
 	install -m 0755 $(PROBE) '$(PKG_BIN)/attackshark-probe'
@@ -164,28 +163,12 @@ package: build
 
 	install -m 0644 README.md '$(PKG_DOC)/README.md'
 	install -m 0644 docs/vendor-hub.md '$(PKG_DOC)/vendor-hub.md'
-	install -m 0644 examples/dpi.conf '$(PKG_DOC)/dpi.conf.example'
 
-	# Written out here rather than copied from tools/install.sh, because the
-	# packaged binary lives in /usr/bin instead of ~/.local/bin. Every other key
-	# is identical to the per-user entry, on purpose.
-	#
-	# umask first: a redirection creates the file 0666 & ~umask, and a umask of
-	# 002 would put a group-writable file into /etc.
-	umask 022; printf '%s\n' \
-		'[Desktop Entry]' \
-		'Type=Application' \
-		'Name=Attack Shark X11 tray' \
-		'Comment=Battery level and DPI stage for the Attack Shark X11 mouse' \
-		'Exec=/usr/bin/attackshark-x11-tray' \
-		'Terminal=false' \
-		'NoDisplay=false' \
-		'X-GNOME-Autostart-enabled=true' \
-		>'$(PKG_AUTO)/attackshark-x11-tray.desktop'
-
+	# No autostart entry: starting the tray with the session is the user's
+	# choice, made in their desktop's startup settings or with the systemd unit
+	# in systemd/. A package that adds one starts a tray nobody asked for.
 	install -m 0755 packaging/postinst '$(PKG_DIR)/DEBIAN/postinst'
 	install -m 0755 packaging/postrm '$(PKG_DIR)/DEBIAN/postrm'
-	install -m 0644 packaging/conffiles '$(PKG_DIR)/DEBIAN/conffiles'
 
 	# One command writes the whole control file, so its quoting survives
 	# `make -n` and a dry run shows exactly what would be written.
@@ -202,14 +185,10 @@ package: build
 		printf 'Description: %s\n' 'battery level and DPI stage of an Attack Shark X11 in the tray'; \
 		printf '%s\n' \
 			' A tray icon showing the battery percentage and charge state of an Attack' \
-			' Shark X11 mouse, and which of its six DPI stages is selected. The 2.4 GHz' \
-			' receiver is read directly over hidraw, so nothing is polled and nothing is' \
-			' requested from the device.' \
-			' .' \
-			' It only ever reads. The DPI button on the mouse stays the supported way to' \
-			' change stages, and the per-stage DPI values come from' \
-			' ~/.config/attackshark-x11/dpi.conf, for which the app writes a template and' \
-			' never invents a number.' \
+			' Shark X11 mouse, and which of its six DPI stages is selected, with the DPI' \
+			' value each stage holds. The 2.4 GHz receiver is read directly over hidraw,' \
+			' and the stage, the DPI value and the polling rate can be switched from the' \
+			' menu. Nothing is guessed: values the device has not reported are left blank.' \
 			' .' \
 			' attackshark-probe is included for diagnosis: "attackshark-probe doctor"' \
 			' checks device access, the udev rule and the session, and' \
@@ -257,21 +236,24 @@ help:
 		'  GOARCH=arm64             same, in Go spelling, as a cross-build sets it' \
 		'  GO=/path/to/go           toolchain to build with' \
 		'  GOFLAGS=-race            passed through to every go build, vet and test' \
-		'  UNINSTALL_ARGS=--purge   passed on to tools/uninstall.sh' \
+		'  UNINSTALL_ARGS=--with-udev  passed on to tools/uninstall.sh' \
 		'' \
 		'installing:' \
 		'' \
-		'  make install     per-user, no root, into ~/.local/bin, with autostart entry' \
-		'  make package     system-wide, one .deb, for every user on the machine' \
+		'  1. sudo tools/install-udev.sh   device access, once, and before the tray' \
+		'                                  will see the mouse' \
+		'  2. make package                 build dist/attackshark-x11_<version>_<arch>.deb' \
+		'     sudo apt install ./dist/attackshark-x11_*.deb' \
 		'' \
-		'  The two are alternatives rather than layers. Install both and ~/.local/bin' \
-		'  shadows /usr/bin on most PATHs, while the single-instance lock the app takes' \
-		'  means the loser exits quietly instead of drawing a second tray icon.' \
+		'  make install does the same for a source checkout: per-user, no root, into' \
+		'  ~/.local/bin. The package and that are alternatives rather than layers -' \
+		'  install both and ~/.local/bin shadows /usr/bin on most PATHs, while the' \
+		'  single-instance lock means the loser exits quietly instead of drawing a' \
+		'  second tray icon.' \
 		'' \
-		'  Device access is one privileged step either way. The .deb installs the udev' \
-		'  rule itself; a source install needs it once, before the tray will see the' \
-		'  mouse:' \
-		'' \
-		'      sudo tools/install-udev.sh' \
+		'  Neither route starts the tray with your session. That is yours to set up:' \
+		'  add /usr/bin/attackshark-x11-tray (or ~/.local/bin/attackshark-x11-tray)' \
+		'  to your desktop'\''s startup applications, or copy' \
+		'  systemd/attackshark-x11-tray.service into ~/.config/systemd/user.' \
 		'' \
 		'README.md has the full story, including why the rule looks the way it does.'

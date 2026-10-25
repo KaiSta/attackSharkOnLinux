@@ -1,9 +1,15 @@
 # Attack Shark X11 on Linux
 
 A tray app for the Attack Shark X11 wireless mouse: battery level and charging
-state in the icon, the exact percentage and DPI stage in the tooltip, and the
-DPI stage in the menu. Strictly **read-only** — the mouse announces both values
-on its own, so nothing here ever writes to the device.
+state in the icon, the exact percentage, DPI stage and polling rate in the
+tooltip, and menus that switch DPI stages, set a stage's DPI value and switch
+the polling rate. Battery and stage come from what the mouse reports, the
+per-stage values and the polling rate are read from it, and the only settings the
+app writes are the selected stage, the DPI value of the stage the mouse is on,
+and the polling rate — when you pick one. See
+[DPI values](#dpi-values-what-the-device-holds-and-how-this-app-reads-it),
+[switching stages](#switching-stages-from-the-menu) and
+[the polling rate](#polling-rate).
 
 ![icon states](docs/icon-states.png)
 
@@ -23,17 +29,17 @@ one self-contained binary.
 | | |
 |---|---|
 | Battery percentage | **Yes**, exact, refreshed every ~2 s, and stamped with its age |
-| Charging state | **Yes**, reported by the mouse |
-| Current DPI stage (of 6) | **Yes**, but only announced when it *changes* |
-| Changing the DPI stage | **No.** This app never writes to the mouse |
-| DPI *value* per stage | **Not from the device.** You supply it once — see below |
+| Charging state | **Yes**, reported by the mouse, including a completed charge |
+| Current DPI stage (of 6) | **Yes**, read when the device opens and announced when it *changes* |
+| Changing the DPI stage | **Yes**, from the **DPI stages** menu, confirmed by the mouse |
+| DPI *value* per stage | **Yes**, read from the device when it opens and after every confirmed write |
+| Setting a stage's DPI value | **Yes**, from the **DPI value** menu in 2000 DPI steps, confirmed by the mouse |
+| Polling rate | **Yes**, read when the device opens; there is no announcement for it |
+| Changing the polling rate | **Yes**, from the **Polling rate** menu, confirmed by the mouse |
 
-The last two rows are the honest ones, so they get their own sections.
+The stage and polling rows carry caveats, so they get their own sections.
 
-## DPI values: what the vendor publishes, and what it does not
-
-This is the part that most tools get wrong, so here is exactly what is
-established and how.
+## DPI values: what the device holds, and how this app reads it
 
 **Published, from the vendor's own product page for the X11:**
 
@@ -44,131 +50,194 @@ established and how.
 | DPI stages | 6, all adjustable |
 | Polling rate | 1000 Hz |
 
-**Not published anywhere: the factory DPI value of each individual stage.**
-The vendor's specification gives the stage *count* and the sensor *ceiling*, and
-nothing more. That was checked against the product pages, the official
-driver/firmware/manual download page, general search results and the community
-projects listed under [Credits](#credits), and no factory table exists in any of
-them.
+What the vendor does not publish is the factory value of each stage, and the
+mouse does not push it on its status channel either. It is stored in the mouse
+and readable over the vendor feature reports — but only after a two-step
+handshake, which is why earlier versions of this app concluded it could not be
+read at all.
 
-That matters because the number is genuinely useful to have and genuinely easy
-to fake. The mouse reports which of its six stages is *selected*; it never
-reports what that stage is *set to*. So a tool that displays "1600 DPI" for this
-mouse is either reading the vendor's own configuration or inventing a number —
-and on Linux it cannot be reading the configuration, because the reads return
-garbage (see [Negative results](#negative-results-what-does-not-work)).
+**The handshake.** Report `0xA0` is a one-shot read-permission mailbox. The host
+asks with an 8-byte feature `SET_REPORT`:
 
-This app therefore treats the value as configuration rather than telemetry:
-
-```bash
-# One-off, on the command line:
-attackshark-x11-tray -dpi 800,1600,2400,3200,6400,22000
-
-# Or persistently, which is what the autostart entry uses:
-$EDITOR ~/.config/attackshark-x11/dpi.conf
+```
+a0 04 38 00 01 00 00 00     read report 0x04 (56 bytes), profile 1
 ```
 
-The file is `stage=value`, one per line, all six required:
+then reads `0xA0` back after ~250 ms (byte 1 is `0x01` when a read is permitted)
+and reads report `0x04`. The permission covers exactly one read. A feature read
+made *without* it returns leftover bytes that look random, which is what made
+the channel look unreadable in the first place — see
+[Negative results](#negative-results-what-does-not-work).
 
-```ini
-# DPI value of each stage, as shown by the vendor's software.
-1=800
-2=1600
-3=2400
-4=3200
-5=6400
-6=22000
-```
+On the wire that is a HID `SET_REPORT` control transfer — `bmRequestType 0x21`,
+`bRequest 0x09`, `wValue 0x0300 | report ID`, `wIndex 2` for the vendor
+interface. Linux's hidraw sends it as `HIDIOCSFEATURE` and reads the replies with
+`HIDIOCGFEATURE`. No output report is involved, which is why the descriptor
+declaring none never actually blocked this.
 
-`examples/dpi.conf` is an annotated copy of that, and `tools/install.sh` drops
-it into place if you do not already have one. The tray's own menu reaches it too:
-**Open DPI config** opens the file in your editor, writing that template first if
-the file does not exist yet. The values are read once at startup, so restart the
-tray to pick up an edit. Values outside 1–22,000 are
-rejected, because the sensor's published maximum makes a bigger number a typo
-rather than a setting. A malformed file is a startup error rather than something
-silently ignored — quietly discarding values you deliberately wrote is worse
-than refusing to start.
+Report `0x04` carries the six stage codes, the active stage, the enabled-stage
+bitmask and a 16-bit checksum over bytes 3–49, which this app verifies before it
+believes anything. The codes are the PAW3311's own scale rather than plain
+integers, so they are decoded with the sensor's table.
 
-**Where to read the real numbers: the vendor's Windows software, and only
-that.** They live in the mouse, and the tool that reads them for this model is a
-Windows application. Attack Shark also runs a browser-based configuration tool,
-the "ATTACK SHARK HUB" at `controlhub.top`, but **it does not support this
-mouse** — verified, not assumed, and documented in
-[docs/vendor-hub.md](docs/vendor-hub.md). Two independent reasons, neither of
-them about Linux:
+This was implemented from the protocol notes of the
+[attack-shark-x11-driver](https://github.com/HarukaYamamoto0/attack-shark-x11-driver)
+project, which reverse engineered the same `1d57:fa60` receiver. It is confirmed
+on one X11 receiver here — the read returns `800/1600/2400/3200/5000/22000` with
+a valid checksum — but it depends on firmware behaviour, and firmware may
+differ between units.
 
-- The hub's device database lists a single vendor ID, `0x3554`. This receiver
-  is `1d57:fa60`, so the hub's WebHID filter never offers it.
-- The hub binds only to a HID collection exposing exactly one input report and
-  one **output** report with report ID 8 — it talks to mice by sending output
-  reports. This receiver declares **no output reports at all**, on any
-  interface (`attackshark-probe reportmap` prints the full map).
+### When the read fails
 
-So it would fail identically on Windows in the same Chromium. The vendor's
-actual tool for the X11 is `ATTACK SHARK X11 SOFT.exe`, Windows-only, and the
-X11 manual is an image-only PDF with the text converted to outlines. Neither is
-a source you can read on Linux.
+The tray asks for the DPI configuration and the polling rate once per device open
+(`-read-dpi`, on by default). A refused permission is retried after a pause,
+because this firmware needs a quiet moment between reads: on hardware,
+back-to-back reads without that pause failed about half the time. If anything is
+off — an older firmware without the mailbox, the wrong hidraw collection, a
+mouse that is asleep, a checksum that does not add up, a DPI code this build does
+not know — the read is abandoned and nothing is invented:
 
-Until you have those numbers, set nothing: the tray shows `DPI: stage 3 of 6`
-with no invented value attached, which is the honest output. Once you know them,
-they are configuration, exactly as above — and if you have changed a stage, your
-own numbers are the only correct ones.
+- the **DPI stages** entries stay as `Stage 3`, and the tooltip says the value
+  has not been read;
+- the stage row reads `DPI: unknown` until the mouse announces a stage change;
+- the polling menu reads `Polling rate: unknown`.
 
-Until you configure them, the tray shows `DPI: stage 3 of 6` with no invented
-value attached, and the DPI stages submenu lists all six with the vendor's
-sensor facts in the tooltip.
+There is no config file and no flag to fill in the numbers. An earlier version
+kept a hand-written `dpi.conf` for exactly this case, and it was removed: a value
+typed once goes stale the moment the mouse is switched on another machine, and a
+stale number shown in the same font as a measured one is worse than a blank.
+`attackshark-probe dpi` says why a read failed, which is the thing worth acting
+on.
 
-### Why switching is not supported
+Attack Shark also runs a browser-based configuration tool, the "ATTACK SHARK
+HUB" at `controlhub.top`, but **it does not support this mouse** — verified, not
+assumed, and documented in [docs/vendor-hub.md](docs/vendor-hub.md). The hub
+binds only to a collection with one input and one **output** report with report
+ID 8; this receiver declares no output reports at all, and the hub's device
+database does not list `1d57:fa60` either. It would fail identically on Windows
+in the same Chromium.
 
-The mouse's own DPI button is the supported way to change stages, and this app
-deliberately does not offer an alternative. The vendor's report descriptor does
-declare a Sinowealth-style vendor block, so writing looked plausible, but every
-feature read on this dongle returns unaddressable data and the descriptor
-declares no output reports at all. Confirming a write protocol would mean
-running the vendor's Windows software under Wine and tracing its HID ioctls;
-that is a real project of its own, and until someone does it, no write path
-belongs in a tool whose whole value is that it never lies to you.
+### Switching stages from the menu
+
+Click a stage in **DPI stages** to switch the mouse to it. The report carries the
+whole configuration, not just a stage number, so the app does a
+read-modify-write:
+
+1. read report `0x04` through the `0xA0` mailbox (above);
+2. replace byte 24, the selected stage, and recompute the checksum at 50–51;
+3. write the 56-byte report back with feature `SET_REPORT`;
+4. wait for the device's `0x50` confirmation naming report `0x04`.
+
+The tick follows confirmation, not the click. A rejection (`03 55 50 01 04`),
+or a timeout that a read-back of the configuration cannot explain, leaves the
+displayed stage alone and posts a notification saying so. The `0x50` reply is
+sometimes not delivered even when the write landed, so a timeout is settled by
+reading the configuration back and comparing the stage. A `0x10` announcement of
+the requested stage counts as confirmation too.
+
+Only the stage changes: the six DPI values, per-stage colours, angle snap,
+ripple control and profile are written back exactly as they were read. If the
+configuration cannot be read, the app refuses to write, because synthesising one
+would silently reset those settings. Switching therefore works even with
+`-read-dpi=false`; that flag only controls the startup read the labels come from.
+
+This is the same feature `SET_REPORT` path as the read — `HIDIOCSFEATURE`,
+`wValue 0x0304` on the vendor interface, no output report — and it works on the
+2.4 GHz receiver (`1d57:fa60`), the only mode this app opens.
+
+The read and the write both address profile 1, which is the profile this unit
+reports as active. The X11 has five profiles and this app does not manage them,
+so if you have switched the mouse to another profile by its own controls, a
+stage picked here may not be the one you see.
+
+### Setting the DPI value from the menu
+
+**DPI value** sets how sensitive the stage the mouse is on is: 2000 DPI up to
+22000, in 2000 DPI steps. Whichever entry you click is applied to the stage the
+mouse is on at that moment — the other five keep their values — and the tick, the
+`DPI:` line and the stage labels follow the device's confirmation.
+
+It is the same read-modify-write as a stage switch, with two code bytes and a
+double-speed flag replaced instead of the selected stage:
+
+1. read report `0x04` through the `0xA0` mailbox (above);
+2. look up the sensor code for the chosen value;
+3. replace bytes 8–13 / 16–21 for that stage's two code bytes and set or clear
+   its bit in byte 6 (the flag that doubles a code, which is how 22000 is
+   stored), then recompute the checksum at 50–51;
+4. write the 56-byte report back and wait for the `0x50` confirmation.
+
+The encoding is not a plain integer: it is the PAW3311's own table, and the app
+verifies every code by decoding it again before writing, so a value can never be
+written as a code that reads back differently. Setting a value also replaces all
+six labels with the configuration just read, because that read is where they came
+from.
+
+A stage whose value is not one of the steps (3200, say) simply leaves every box
+empty; the `DPI:` line still names it. If the mouse has not reported which stage
+it is on, a pick is refused with a notification rather than applied to a guess.
+
+### Polling rate
+
+**Polling rate** lists the four rates the mouse supports, with the current one
+ticked. There is no button and no announcement for this setting the way there is
+for the stage: the rate is read once when the device opens, and after a change
+the tick follows the device's own confirmation.
+
+The report is nine bytes instead of fifty-six:
+
+1. read report `0x06` through the same `0xA0` mailbox;
+2. replace the rate code, keeping the profile the report named;
+3. write it back with feature `SET_REPORT`, the checksum `0xFF - code` at byte 4;
+4. wait for the `0x50` confirmation naming report `0x06`.
+
+| Menu entry | Code | The vendor's name for it |
+|---|---|---|
+| 125 Hz | `0x08` | power saving |
+| 250 Hz | `0x04` | office |
+| 500 Hz | `0x02` | gaming |
+| 1000 Hz | `0x01` | eSports |
+
+Because the report carries only the rate, a change does not have to preserve
+anything: if the read before the write is refused, the write still goes ahead for
+profile 1, the profile the DPI code addresses. A missing confirmation is settled
+the same way as for a stage, by reading the rate back and comparing it. With
+`-read-dpi=false` the menu shows `Polling rate: unknown` until a change is
+confirmed, but switching still works.
+
+This unit reads 1000 Hz; the tooltip then ends with `- 1000 Hz polling`.
 
 ## Install
 
-Needs Go 1.24+ (the version in `go.mod`) and `make`, which wraps the scripts
-below rather than replacing them.
+Two steps: device access, then the package. Building needs Go 1.24+ (the version
+in `go.mod`), `make`, and `dpkg-deb` for the package itself.
 
 ```make
 make build       # both binaries into bin/, no root, nothing else touched
 make check       # gofmt -l, go vet and go test: the same three CI runs
-make install     # per-user: ~/.local/bin, autostart entry, docs, dpi.conf template
 make package     # dist/attackshark-x11_<version>_<arch>.deb, needs dpkg-deb
-make uninstall   # undo the per-user install
-make help        # the same list, plus VERSION=, ARCH= and UNINSTALL_ARGS=
+make help        # the same list, plus VERSION=, ARCH= and other variables
 ```
 
-There are two ways to install, and they are alternatives rather than layers. A
-per-user install from source needs one privileged step for device access; the
-package does that step for you, for every user on the machine.
-
-### From source, for one user
+### 1. Device access
 
 ```bash
-# 1. Device access (once). Needs root, changes nothing else on the system.
 sudo tools/install-udev.sh
-
-# 2. Build and install for your user: both binaries into ~/.local/bin, an
-#    autostart entry, the docs, and a template at ~/.config/attackshark-x11/dpi.conf.
-make install
-
-# 3. Check the whole path, including whatever step 1 could have got wrong.
-attackshark-probe doctor
 ```
 
-Then start it now, or log out and back in:
+This installs [udev/99-attackshark-x11.rules](udev/99-attackshark-x11.rules)
+into `/etc/udev/rules.d`, reloads udev and then checks the things that most often
+go wrong: whether `/dev/attackshark-x11` appeared, and whether the user who ran
+`sudo` is actually in `plugdev`. It is required — `/dev/hidraw*` is
+`root:root 0600`, so without a rule the app cannot open the receiver at all —
+and it is enough on its own for a source checkout.
 
-```bash
-~/.local/bin/attackshark-x11-tray -v
-```
+The `.deb` also carries the rule (at `/usr/lib/udev/rules.d`, where a package's
+files belong), so a package install works even if this step was skipped. Running
+it first is still the documented path: it is the only thing that verifies the
+group membership of the actual user, which a package cannot do for you.
 
-### As a Debian package, for every user
+### 2. The package
 
 ```bash
 make package
@@ -176,49 +245,81 @@ sudo apt install ./dist/attackshark-x11_*.deb
 ```
 
 `apt` rather than `dpkg -i`, so `libc6` and `udev` are resolved for you. The
-package puts both binaries in `/usr/bin`, the udev rule in
-`/usr/lib/udev/rules.d`, its own copy of the docs in
-`/usr/share/doc/attackshark-x11`, and an autostart entry in
-`/etc/xdg/autostart` that starts the tray for every user at their next login.
-**Step 1 above is therefore not needed**: `postinst` loads the rule itself, and
-says so if it could not.
+package puts both binaries in `/usr/bin`, the rule in `/usr/lib/udev/rules.d`
+and its own copy of the docs in `/usr/share/doc/attackshark-x11`. `postinst`
+reloads udev and warns if `plugdev` does not exist.
+
+Nothing is started for you. Check the path and start it:
+
+```bash
+attackshark-probe doctor
+attackshark-x11-tray -v
+```
+
+### Starting it with the session is your call
+
+**Neither the package nor `tools/install.sh` writes a startup entry.** A tray
+icon that appears because a package decided it should is a surprise, and the
+right way to start one differs by desktop, so that choice is left to you:
+
+- **Desktop startup applications** — add `/usr/bin/attackshark-x11-tray` (or
+  `~/.local/bin/attackshark-x11-tray` for a source install) to the list of
+  applications your session starts.
+- **systemd user unit** — copy
+  [systemd/attackshark-x11-tray.service](systemd/attackshark-x11-tray.service)
+  into `~/.config/systemd/user`, then `systemctl --user enable --now
+  attackshark-x11-tray.service`.
+
+Either route is fine; enable both and the single-instance lock makes the loser
+exit, but a restarting unit next to a working icon is just noise.
 
 Four things about the package are deliberate:
 
-- **It ships no `dpi.conf`.** The per-stage DPI values belong to your mouse, so
-  there is no file under `/etc` for anyone to inherit. The menu's "Open DPI
-  config" writes the annotated template into the user's own config directory on
-  first use, and `/usr/share/doc/attackshark-x11/dpi.conf.example` is the same
-  file to copy by hand.
-- **The autostart entry is a conffile.** Editing it is legitimate, so an upgrade
-  does not overwrite your version. A plain `dpkg -r` therefore *keeps* it, and
-  `postrm` says so, because an entry left pointing at a binary that is no longer
-  installed is hard to place. `dpkg --purge` removes it.
+- **It ships no configuration file.** Nothing but the mouse supplies the
+  per-stage DPI values, so there is nothing for a new user to inherit or edit.
+- **It installs no autostart entry**, for the reason above: starting the tray is
+  the user's decision, not the package's.
 - **The version comes from the `VERSION` file.** It holds the version the next
   release is built as, and `make package` reads it. A release is a `v*` tag
   matching that file (`v0.1.0` for `0.1.0`), which builds `amd64` and `arm64`
   packages and attaches both to the GitHub release. `make package VERSION=1.2.3`
   overrides the file for a one-off build; with no file it falls back to
   `git describe --tags --always`, rewritten into something dpkg accepts.
-- **Nothing in it writes to the mouse**, exactly as the binaries it contains.
+- **It changes three mouse settings, and only on request.** The frames it can
+  send are the `0xA0` read-permission request, the configuration report with its
+  stage byte replaced when a stage is picked from the menu (or one stage's DPI
+  codes when a value is picked), and the nine-byte polling-rate report when a
+  rate is picked. Nothing else is written, and the binaries it contains behave
+  the same way.
+
+### From a source checkout, without a package
+
+```bash
+make install          # both binaries into ~/.local/bin, plus the docs
+make uninstall        # undo that
+```
+
+This needs no root and writes no startup entry. It is an alternative to the
+package rather than a layer on top of it: install both and `~/.local/bin`
+shadows `/usr/bin` on most `PATH`s.
 
 ### Undoing either install
 
 ```bash
-tools/uninstall.sh                   # binaries, autostart entry, installed docs
-tools/uninstall.sh --purge           # also dpi.conf and the remembered stage
-sudo tools/uninstall.sh --with-udev  # also the udev rule in /etc
+tools/uninstall.sh                       # per-user binaries and installed docs
+sudo tools/uninstall.sh --with-udev      # also the udev rule in /etc
 sudo tools/uninstall.sh --with-package   # also a system-wide .deb install
 ```
 
-`make uninstall` runs that script, and `make uninstall UNINSTALL_ARGS=--purge`
-passes the flag through. The two root-only flags are checked before anything is
+`make uninstall` runs that script, and `make uninstall UNINSTALL_ARGS=--with-udev`
+passes a flag through. The two root-only flags are checked before anything is
 removed, so forgetting `sudo` fails with a message instead of leaving a
 half-removed installation, and the script removes the *invoking* user's files
 when run through `sudo` rather than looking in root's home directory.
 
-Your `dpi.conf` and the remembered stage survive a plain `uninstall.sh` on
-purpose: they describe your mouse, and nothing can regenerate them.
+If you installed an earlier version, its `~/.config/attackshark-x11/dpi.conf`
+and `~/.local/state/attackshark-x11/stage` are not yours any more: nothing reads
+them, and this app will not start from stale numbers. Deleting them is safe.
 
 `doctor` is the quickest way to tell an installation problem from a mouse that is
 simply asleep: it prints one line per check and exits non-zero only when
@@ -228,8 +329,14 @@ either `/usr/bin/attackshark-x11-tray` from the package or
 
 ### The udev rule, and why it looks the way it does
 
-`/dev/hidraw*` is `crw------- root root` by default, so the app needs an
-exception. Two things about `udev/99-attackshark-x11.rules` are deliberate:
+**The rule is still required, and nothing about the feature-report protocol
+changes that.** `/dev/hidraw*` is `crw------- root root` by default, so without
+it the app cannot even `open()` the receiver — every read, every write and every
+announcement depends on the same access. Rule 1 is the load-bearing one; rule
+2's symlink is only convenience, since the app also finds the node by scanning
+sysfs for `1d57:fa60`.
+
+Two things about `udev/99-attackshark-x11.rules` are deliberate:
 
 - **It is split into two rules.** Every `ATTRS` match within one rule must
   resolve to the same parent device, and udev fails *silently* otherwise. The
@@ -269,21 +376,20 @@ attackshark-x11-tray -h
 | flag | meaning |
 |---|---|
 | `-icon-size` | tray icon edge length, default 24 px |
-| `-dpi` | the six per-stage DPI values, in stage order |
-| `-dpi-config` | file to read them from when `-dpi` is not given |
+| `-read-dpi` | read the per-stage DPI values, the selected stage and the polling rate from the mouse when it is opened (default on) |
 | `-poll-timeout` | how long a single device read may block |
 | `-retry-every` | delay before re-opening the receiver after it disappears |
-| `-state-dir` | where the last observed stage is remembered (default `~/.local/state/attackshark-x11`) |
 | `-no-notify` | suppress desktop notifications |
 | `-v` | log device activity to stderr |
 
-The menu shows the live battery reading, the DPI stage with its configured
-value, the connection state, and a read-only **DPI stages** submenu listing all
-six stages with the current one ticked. **Open DPI config** opens the file the
-values come from in your own editor, creating it from the annotated template if
-it is missing. On quit, replacing the receiver, or
-unplugging it, the icon turns grey and the app reopens the device when it
-returns — no restart needed.
+The menu shows the live battery reading, the DPI stage with its value, the
+connection state, a **DPI stages** submenu listing all six stages with the
+current one ticked, a **DPI value** submenu that sets the current stage's value
+in 2000 DPI steps, and a **Polling rate** submenu listing the four rates; clicking
+one switches the mouse to it (see above). There is no config menu and no file to
+edit: every number on screen came from the device. On quit, replacing the
+receiver, or unplugging it, the icon turns grey and the app reopens the device
+when it returns — no restart needed.
 
 **One instance per session.** A second copy exits with a message naming the lock
 file instead of adding a second icon, because two instances would both open the
@@ -322,12 +428,30 @@ idle use, which is why the reading looked frozen. The age is what lets you tell
 "nothing is draining" apart from "nothing is arriving". The thresholds are tied
 to the observed 2 s heartbeat and a test asserts they stay that way.
 
-**The stage is remembered, not measured.** The mouse announces its stage only
-when the stage changes, so on startup nothing is known and the menu reads
-`DPI: unknown`. Press the mouse's DPI button once and it syncs. The last
-observed stage is written to `~/.local/state/attackshark-x11/stage` and shown
-afterwards as `stage N (last seen)` — explicitly marked as remembered rather
-than observed, so a stale value cannot masquerade as live telemetry.
+**The first reading after connecting is held back.** The firmware is known to
+report `100 %` before its gauge has settled, so the first frame after each device
+open is logged but not shown, and neither the tooltip nor the "Battery is full"
+alert sees it. The next heartbeat, two seconds later, is what goes on screen. If
+that frame never arrives the tray keeps saying the battery is waiting rather
+than showing a number it cannot vouch for.
+
+**A completed charge is now a reported state.** The charge byte is `0x02` when
+charging finishes, and the tooltip and menu say `100 % (fully charged)` instead
+of `(unknown)`; the notification fires from that frame rather than from the
+"≥ 99 % while charging" guess, which is kept only as a fallback for when the
+frame is not delivered.
+
+**The stage is read, then followed.** The report read above also says which
+stage the mouse has selected, so the menu names it from the first device open —
+no press of the mouse's DPI button needed. After that the mouse announces a new
+stage whenever it changes, and picking one from the menu confirms it, so the
+label keeps tracking the device.
+
+If that startup read does not happen — `-read-dpi=false`, older firmware, a
+sleeping mouse — nothing is filled in from a previous run: the stage row reads
+`DPI: unknown` until the mouse announces a stage change, because a stage
+remembered from the last session is not evidence about this one. Nothing is
+written to disk, so there is no state file to go stale.
 
 ### probe tool
 
@@ -336,20 +460,30 @@ attackshark-probe info       # discovery, interface numbers, descriptor size
 attackshark-probe reportmap  # every input/output/feature report the descriptor declares
 attackshark-probe battery    # wait for the next heartbeat, print it
 attackshark-probe stage      # wait for a stage announcement (tap the DPI button)
+attackshark-probe dpi        # read the stored per-stage DPI values from the device
+attackshark-probe set-stage  # switch the selected DPI stage, waiting for the confirmation
+attackshark-probe polling    # read the polling rate the device is set to
+attackshark-probe set-polling # switch the polling rate, waiting for the confirmation
+attackshark-probe set-dpi    # set the DPI value of a stage, waiting for the confirmation
 attackshark-probe stream     # decode every status report as it arrives
 attackshark-probe dump       # hexdump every frame, for reverse engineering
 attackshark-probe doctor     # check the installation, not the device
 ```
 
-Every subcommand is read-only. `-changes-only` on `stream` filters out repeat
-heartbeats. `stage` prints the stage number, and says so if you were expecting a
-DPI value to come with it.
+Everything except `dpi`, `polling`, `set-stage`, `set-dpi` and `set-polling` is
+read-only. `dpi` and `polling` send the `0xA0` permission request so the firmware
+will answer a read, which changes no setting. The three `set-` commands are the
+ones that do: `set-stage` and `set-dpi` read the configuration, change the
+selected stage or that stage's DPI value, and write it back; `set-polling` writes
+the nine-byte polling-rate report. All three print the device's confirmation and
+read the setting back.
+`-changes-only` on `stream` filters out repeat heartbeats. `stage` prints the
+stage number, and points at `dpi` for the value behind it.
 
 `doctor` is the one to reach for when the tray shows nothing, or shows less than
 you expect. It checks the udev rule and its symlink, opens the receiver the way
-the app does and waits for one report, reads your `dpi.conf`, looks for the
-installed tray binary and autostart entry, and asks the session bus whether
-notifications have a daemon to reach. Each line is `ok`, `warn` or `FAIL`: a
+the app does and waits for one report, looks for the installed tray binary, and
+asks the session bus whether notifications have a daemon to reach. Each line is `ok`, `warn` or `FAIL`: a
 warning is something the app copes with (a missing symlink, a mouse that is
 asleep), a failure is something that stops it, and only failures make the command
 exit non-zero.
@@ -361,15 +495,19 @@ Reverse engineered on real hardware: Attack Shark X11, 2.4 GHz receiver,
 Device`). It is a four-interface composite HID device; only **USB interface #2**
 carries the vendor channel described here.
 
-The channel pushes **HID report ID `0x03`, five bytes**, with two subtypes:
+The channel pushes **HID report ID `0x03`, five bytes**, with three subtypes:
 
 ```
 03 55 40 01 4e     battery:  byte 3 = charge state, byte 4 = percent
-                   (0x01 discharging, 0x03 charging, 0x4e = 78 %)
-                   pushed every ~2.00 s while the mouse is awake
+                   (0x01 discharging, 0x03 charging, 0x02 fully charged,
+                    0x4e = 78 %) pushed every ~2.00 s while the mouse is awake
+                   the 0x40 may arrive as 0x41, documented upstream as the same
+                   event and accepted here for that reason
 
 03 55 10 03 00     DPI stage: byte 3 = current stage, 1..6
                    pushed only when the stage changes
+
+03 55 50 00 04     feature-report reply: byte 3 = status, byte 4 = report id
 ```
 
 Frames are `03 55 <kind> <value> 00` except for the battery subtype, whose
@@ -389,8 +527,9 @@ t=11.45   03 55 10 03 00
 ```
 
 Nothing has to be requested for any of this: the receiver volunteers both
-values, which is why the display needs no writes and no polling, and why the app
-runs unprivileged once the udev rule is in place.
+values, which is why the live display needs no writes and no polling, and why
+the app runs unprivileged once the udev rule is in place. Only the stored DPI
+configuration has to be asked for, as described above.
 
 `internal/mouse` is the whole decoder, and it is deliberately strict — it
 requires report ID `0x03`, the `0x55` magic and an exact length, and passes
@@ -399,9 +538,10 @@ through an out-of-range stage instead of silently dropping it.
 ## Negative results: what does *not* work
 
 Documented because each of these looks like it should work, and rediscovering
-that it does not is expensive.
+that it does not is expensive. The first one has since been resolved; it is kept
+with the correction, because the wrong conclusion was believed for a while.
 
-### Feature reports return unaddressable data
+### Feature reads without the mailbox return unaddressable data
 
 The vendor interface's report descriptor declares a Sinowealth-style feature
 report block on Usage Page `0x0B`, with report IDs `0x04`…`0x2E` and lengths
@@ -423,8 +563,12 @@ differently: they fail with `EBUSY`, because `usbfs` refuses control transfers
 to an interface the `usbhid` driver owns, so a clean `GET_REPORT` would require
 detaching the interface from the kernel.
 
-**Consequence: DPI values per stage are unreadable from Linux by any method
-tried, and the app does not pretend otherwise.**
+**Resolved.** The reads were being made without asking first. Report `0xA0` is a
+read-permission mailbox: one `SET_REPORT` to it grants exactly one read, and
+until it is granted the firmware returns residue. See
+[DPI values](#dpi-values-what-the-device-holds-and-how-this-app-reads-it). What
+remains true is that a read has to be both addressed and permitted; a bare
+`HIDIOCGFEATURE` is still worthless on this receiver.
 
 ### The descriptor declares no output reports
 
@@ -434,9 +578,12 @@ output reports at all**, and 24 feature reports (`0x04`…`0x2E`, plus `0xA0`)
 with lengths from 6 to 133 bytes. `attackshark-probe reportmap` prints exactly
 that, item by item, straight off the device.
 
-So there is no documented channel for a stage change even if one wanted to write
-one. That is the second reason this app has no switching: not only is the write
-protocol unknown, the descriptor offers no output report to carry it.
+There is therefore no output-report channel on this device — but that is not the
+same as no way to write. Feature reports are writable with `SET_REPORT`, and
+that is the direction the vendor software uses; the lack of an output report
+only rules out tools that insist on one. This app writes only the `0xA0`
+permission request and, when asked to switch, the configuration report with a
+changed stage byte, as explained above.
 
 It is also why the vendor's own browser tool cannot configure this mouse. That
 tool sends commands as an output report — it requires a collection with one
@@ -468,24 +615,36 @@ demonstration, including the hub's device database and the binding check.
   the only way to judge that trade-off by eye.
 - **Notifications are fire-and-forget, not fire-once.** Low battery warns at
   20 % and 10 %, once per threshold per discharge cycle, re-armed when charging
-  starts. "Full" is a deliberate heuristic (≥99 % while charging) and is
-  commented as such, because the mouse has no distinct full state. A post that
+  starts. "Full" comes from the mouse's own `0x02` frame, with the ≥ 99 % while
+  charging reading as a fallback for when that frame is missed. A post that
   fails is retried once after five minutes, and the notifier refuses to try again
   for that long in between: a desktop whose notification daemon is missing, or has
   just been restarted, loses one warning rather than every notification for the
   rest of the session.
-- **No package in this repository writes to the device.** The only ioctls
-  implemented are reads; `GetFeature` is kept solely to document the negative
-  result above.
-- **A wrong label is worse than no label.** That principle is what made the
-  DPI values a config file rather than a lookup table, and the tests assert that
-  an unconfigured mapping never produces a number in the tooltip.
+- **Two writes, both feature reports.** `hidraw.SetFeature` sends the `0xA0`
+  read-permission request and, when a stage is clicked, the 56-byte `0x04`
+  configuration with only its stage byte changed. Both go through
+  `internal/mouse`, both are refused when the configuration cannot be read, and
+  no other package writes to the device. Keeping the write surface to one ioctl
+  and two frames is what makes that checkable.
+- **A wrong label is worse than no label.** That principle is what keeps the
+  device read strictly validated (report ID, checksum, known codes, range) and
+  why a failure falls back to the config file instead of guessing. It is also
+  why the menu tick only moves on the device's confirmation. The tests assert
+  all of it: a bad report is refused, an unconfigured mapping never produces a
+  number in the tooltip, and a rejected or unconfirmed switch leaves the stage
+  where it was.
 
 ## Credits
 
-Two community projects made this much faster to write, and both are worth
+Three community projects made this much faster to write, and all are worth
 looking at:
 
+- [HarukaYamamoto0/attack-shark-x11-driver](https://github.com/HarukaYamamoto0/attack-shark-x11-driver) —
+  the reverse engineering that made the DPI read possible: the `0xA0`
+  permission mailbox, the `0x04` configuration report's layout and checksum,
+  and the PAW3311 DPI code table used by `internal/mouse`. Its protocol notes
+  are the reason the negative result above could be corrected.
 - [daviirodrig/attackshark](https://github.com/daviirodrig/attackshark) —
   independently targets the same `1d57:fa60` receiver and decodes the battery
   frame the same way (`report[3]` charge, `report[4]` percent). Arriving at the
@@ -520,19 +679,18 @@ of its own, because a package installs to `/usr` instead of a home directory.
 a shell syntax check and a ten-second run of each fuzz target.
 `.github/workflows/release.yml` runs on a `v*` tag: it checks that the tag names
 the version in `VERSION`, then builds the `amd64` and `arm64` packages and
-attaches both to the GitHub release. The parsers are
-fuzzed as well as unit tested, because a byte stream from the mouse and a config
-file written by hand are both untrusted input:
+attaches both to the GitHub release. The parsers are fuzzed as well as unit
+tested, because a byte stream from the mouse is untrusted input:
 
 ```bash
 go test ./internal/mouse -run='^$' -fuzz=FuzzParseBattery -fuzztime=30s
-go test ./internal/mouse -run='^$' -fuzz=FuzzParseDPIStages -fuzztime=30s
-go test ./internal/trayapp -run='^$' -fuzz=FuzzLoadDPIStages -fuzztime=30s
+go test ./internal/mouse -run='^$' -fuzz=FuzzParseDPIConfig -fuzztime=30s
+go test ./internal/mouse -run='^$' -fuzz=FuzzParseCommandConfirmation -fuzztime=30s
 ```
 
 A failing input is written to `testdata/fuzz/<target>/` and is a permanent case
-from then on; the seed corpus in each test holds the frames and files captured
-from real hardware.
+from then on; the seed corpus in each test holds frames captured from real
+hardware.
 
 The icon can be rendered without a running tray, which is how the image at the
 top of this file is regenerated:
