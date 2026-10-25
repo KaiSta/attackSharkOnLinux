@@ -134,17 +134,23 @@ a stage — including yours.
 
 ## Consequence for the DPI values
 
-`README.md` still stands: the value behind each stage is not published, and the
-mouse never reports it. What this document adds is that the hub is not a way
-around that, and neither is the manual.
+`README.md` still stands on the part it can: the value behind each stage is not
+published, and the mouse never *pushes* it on its status channel. It is read
+from the device's feature reports after the `0xA0` permission handshake
+(`attackshark-probe dpi`), which is a different channel from everything the hub
+binds to. What this document adds is that the hub is not a way around that, and
+neither is the manual.
 
 The remaining untouched lead is the receiver's own vendor channel: report ID
 `0x08` is declared as a 58-byte feature report, and the hub's read command
 format is known (`[0x08, 0x00, address_hi, address_lo, length, ...]` with a
 `0x55`-based checksum). A *query* would mean sending a feature report to the
-device — a write, which the application does not do — and the response channel
-for this dongle is unproven. Nothing in this repository does it: the project is
-strictly read-only.
+device, and the response channel for this dongle is unproven. Nothing here does
+it: the only frames this project writes are the `0xA0` read-permission request
+and, when a setting is picked from the tray, the configuration report with its
+stage byte or one stage's DPI codes changed, or the nine-byte polling-rate
+report. The hub's query path is not implemented (see the "DPI values" section of
+README.md).
 
 ## Reproducing these findings
 

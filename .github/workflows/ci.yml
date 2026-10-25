@@ -48,10 +48,9 @@ jobs:
       # at a time: -fuzz only accepts a pattern matching a single target.
       - name: fuzz each target briefly
         run: |
-          for target in FuzzParseBattery FuzzParseStage FuzzIsStatus FuzzParseDPIStages; do
+          for target in FuzzParseBattery FuzzParseStage FuzzIsStatus FuzzParseDPIConfig FuzzParseCommandConfirmation; do
             go test ./internal/mouse -run='^$' -fuzz="${target}" -fuzztime=10s
           done
-          go test ./internal/trayapp -run='^$' -fuzz=FuzzLoadDPIStages -fuzztime=10s
 
       # The Debian maintainer scripts have no .sh suffix (dpkg does not use
       # one), so they are named explicitly rather than matched.

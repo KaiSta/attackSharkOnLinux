@@ -45,6 +45,25 @@ func TestParseBattery(t *testing.T) {
 			chargeRaw: 0x03,
 		},
 		{
+			// Documented upstream as 03 55 40 02 64, sent once when charging
+			// completes. Not reproduced here yet, but the byte is unambiguous.
+			name:      "charge complete",
+			report:    []byte{0x03, 0x55, 0x40, 0x02, 0x64},
+			wantOK:    true,
+			percent:   100,
+			charge:    ChargeFull,
+			chargeRaw: 0x02,
+		},
+		{
+			// Upstream documents 0x41 as the same event as 0x40.
+			name:      "alternate battery event code",
+			report:    []byte{0x03, 0x55, 0x41, 0x03, 0x41},
+			wantOK:    true,
+			percent:   65,
+			charge:    ChargeCharging,
+			chargeRaw: 0x03,
+		},
+		{
 			name:      "unknown charge byte stays visible",
 			report:    []byte{0x03, 0x55, 0x40, 0x07, 0x32},
 			wantOK:    true,

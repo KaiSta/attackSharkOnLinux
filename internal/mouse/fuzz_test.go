@@ -1,6 +1,9 @@
 package mouse
 
-import "testing"
+import (
+	"encoding/binary"
+	"testing"
+)
 
 // The parsers are the only thing standing between a byte stream the mouse
 // controls and the number shown on screen, so they are fuzzed for two kinds of
@@ -11,6 +14,8 @@ func FuzzParseBattery(f *testing.F) {
 	// Captured from the receiver, plus the shapes that must not decode.
 	f.Add([]byte{0x03, 0x55, 0x40, 0x01, 0x4e})
 	f.Add([]byte{0x03, 0x55, 0x40, 0x03, 0x64})
+	f.Add([]byte{0x03, 0x55, 0x40, 0x02, 0x64})
+	f.Add([]byte{0x03, 0x55, 0x41, 0x01, 0x4e})
 	f.Add([]byte{0x03, 0x55, 0x40, 0x07, 0x32})
 	f.Add([]byte{0x03, 0x55, 0x10, 0x04, 0x00})
 	f.Add([]byte{0x03, 0x55})
@@ -25,7 +30,7 @@ func FuzzParseBattery(f *testing.F) {
 		if !IsStatus(report) {
 			t.Fatalf("ParseBattery accepted % x, which IsStatus rejects", report)
 		}
-		if report[2] != KindBattery {
+		if report[2] != KindBattery && report[2] != KindBatteryAlt {
 			t.Fatalf("ParseBattery accepted kind %#x", report[2])
 		}
 		if battery.Percent != int(report[4]) {
@@ -35,10 +40,14 @@ func FuzzParseBattery(f *testing.F) {
 			t.Fatalf("ChargeRaw = %#x, want the raw byte %#x", battery.ChargeRaw, report[3])
 		}
 		// However strange the charge byte, it decodes to exactly one of the
-		// three states, and the two known values are never interchangeable.
+		// four states, and the known values are never interchangeable.
 		switch report[3] {
 		case 0x01:
 			if battery.Charge != ChargeDischarging {
+				t.Fatalf("charge byte %#x decoded as %v", report[3], battery.Charge)
+			}
+		case 0x02:
+			if battery.Charge != ChargeFull {
 				t.Fatalf("charge byte %#x decoded as %v", report[3], battery.Charge)
 			}
 		case 0x03:
@@ -115,58 +124,125 @@ func FuzzIsStatus(f *testing.F) {
 	})
 }
 
-// The six DPI values are typed by hand on a command line or written by hand in a
-// config file, so this parser is fuzzed for the same two failures: inventing a
-// value it was not given, and refusing one it was given.
-func FuzzParseDPIStages(f *testing.F) {
-	f.Add("800,1600,2400,3200,6400,22000")
-	f.Add("1,2,3,4,5,6")
-	f.Add("800;1600;2400;3200;6400;22000")
-	f.Add("800 1600 2400 3200 6400 22000")
-	f.Add("800/1600/2400/3200/6400/22000")
-	f.Add("22000,22000,22000,22000,22000,22000")
-	f.Add("")
-	f.Add(",")
-	f.Add("800,1600,2400,3200,6400")
-	f.Add("800,1600,2400,3200,6400,0")
-	f.Add("800,1600,2400,3200,6400,22001")
-	f.Add("-1,2,3,4,5,6")
-	f.Add("eight,1600,2400,3200,6400,22000")
+// EncodeDPI is the one place a sensor code is chosen rather than copied, so its
+// contract is exact: a code is returned for a value if and only if that code
+// decodes back to it, inside the sensor's range.
+func FuzzEncodeDPI(f *testing.F) {
+	for value := 0; value <= MaxDPI; value += 2000 {
+		f.Add(value)
+	}
+	f.Add(50)
+	f.Add(2400)
+	f.Add(20100)
+	f.Add(-1)
 
-	f.Fuzz(func(t *testing.T, text string) {
-		stages, err := ParseDPIStages(text)
+	f.Fuzz(func(t *testing.T, value int) {
+		x, y, double, ok := EncodeDPI(value)
+		if !ok {
+			// Refusing is fine: the sensor's table does not cover every value
+			// between 1 and MaxDPI. What must never happen is a code that
+			// decodes to something other than what was asked for.
+			return
+		}
+		if value < 1 || value > MaxDPI {
+			t.Fatalf("EncodeDPI(%d) returned a code outside the sensor's range", value)
+		}
+		got, decodes := DecodeDPI(x, y, double)
+		if !decodes || got != value {
+			t.Fatalf("EncodeDPI(%d) = %#x, %#x, double %t, which decodes to %d (%t)",
+				value, x, y, double, got, decodes)
+		}
+	})
+}
+
+// The DPI configuration report comes from the device and decides numbers shown
+// as facts, so it is fuzzed for the failures that matter: accepting a report
+// whose checksum does not cover it, inventing a stage value, and leaving a
+// half-decoded mapping behind when it refuses one.
+func FuzzParseDPIConfig(f *testing.F) {
+	f.Add(dpiReport(defaultStages(), 4))
+	f.Add(dpiReport(defaultStages(), 1)[:DPIReportPayload])
+	f.Add(dpiReport(defaultStages(), 1)[:DPIReportPayload-1])
+	f.Add(func() []byte { b := dpiReport(defaultStages(), 1); b[30]++; return b }())
+	f.Add(append([]byte{0x05}, dpiReport(defaultStages(), 1)[1:]...))
+	f.Add([]byte{})
+	f.Add([]byte{0x04, 0x38, 0x01, 0x00})
+
+	f.Fuzz(func(t *testing.T, buf []byte) {
+		cfg, err := ParseDPIConfig(buf)
 		if err != nil {
-			// A rejected line must not leave a partly filled mapping behind.
-			if stages.Configured() {
-				t.Fatalf("ParseDPIStages(%q) = %q with error %v", text, stages, err)
+			if cfg.Stages.Configured() || cfg.Raw != nil {
+				t.Fatalf("ParseDPIConfig(% x) returned %+v with error %v", buf, cfg, err)
 			}
 			return
 		}
 
-		if !stages.Configured() {
-			t.Fatalf("ParseDPIStages accepted %q but reported nothing configured", text)
+		if len(buf) < DPIReportPayload {
+			t.Fatalf("accepted %d bytes, fewer than the %d needed", len(buf), DPIReportPayload)
+		}
+		if buf[0] != DPIReportID {
+			t.Fatalf("accepted report ID 0x%02x", buf[0])
+		}
+		var sum uint16
+		for _, b := range buf[3:50] {
+			sum += uint16(b)
+		}
+		if want := binary.BigEndian.Uint16(buf[50:52]); sum != want {
+			t.Fatalf("accepted a report whose checksum is 0x%04x, not 0x%04x", sum, want)
+		}
+		if !cfg.Stages.Configured() {
+			t.Fatal("parsed a configuration that reports nothing configured")
 		}
 		for stage := 1; stage <= MaxStage; stage++ {
-			value, ok := stages.At(stage)
+			value, ok := cfg.Stages.At(stage)
 			if !ok {
-				t.Fatalf("ParseDPIStages(%q): stage %d is missing", text, stage)
+				t.Fatalf("stage %d is missing", stage)
 			}
 			if value < 1 || value > MaxDPI {
-				t.Fatalf("ParseDPIStages(%q): stage %d = %d, outside 1-%d",
-					text, stage, value, MaxDPI)
+				t.Fatalf("stage %d = %d, outside 1-%d", stage, value, MaxDPI)
 			}
 		}
-
-		// What the tray prints has to be what this parser reads back: String is
-		// used for display and for logging, and the menu labels come from At.
-		rendered := stages.String()
-		again, err := ParseDPIStages(rendered)
-		if err != nil {
-			t.Fatalf("ParseDPIStages(%q) rendered %q, which does not parse: %v",
-				text, rendered, err)
+		if len(cfg.Raw) != len(buf) {
+			t.Fatalf("Raw is %d bytes, want the %d that were parsed", len(cfg.Raw), len(buf))
 		}
-		if again != stages {
-			t.Fatalf("%q rendered %q, which parsed back as %q", text, rendered, again)
+		// A decoded report is itself a valid report: re-parsing the copy kept
+		// for debugging must agree, or the menu would show something else than
+		// what was accepted.
+		again, err := ParseDPIConfig(cfg.Raw)
+		if err != nil {
+			t.Fatalf("re-parsing the accepted report failed: %v", err)
+		}
+		if again.Stages != cfg.Stages || again.ActiveStage != cfg.ActiveStage {
+			t.Fatalf("re-parsing gave %+v, first parse gave %+v", again, cfg)
+		}
+	})
+}
+
+// The confirmation frame decides whether a write is reported as applied, so the
+// parser must never report success for a status it does not understand, and must
+// never accept a frame that is not a confirmation at all.
+func FuzzParseCommandConfirmation(f *testing.F) {
+	f.Add([]byte{0x03, 0x55, 0x50, 0x00, 0x04})
+	f.Add([]byte{0x03, 0x55, 0x50, 0x01, 0x04})
+	f.Add([]byte{0x03, 0x55, 0x50, 0x07, 0x04})
+	f.Add([]byte{0x03, 0x55, 0x40, 0x01, 0x4e})
+	f.Add([]byte{0x03, 0x55, 0x10, 0x02, 0x00})
+	f.Add([]byte{0x03, 0x55, 0x50})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, report []byte) {
+		conf, ok := ParseCommandConfirmation(report)
+		if !ok {
+			return
+		}
+		if !IsStatus(report) || report[2] != KindCommandConfirmation {
+			t.Fatalf("accepted % x, which is not a confirmation", report)
+		}
+		if conf.ReportID != report[4] || conf.Status != report[3] {
+			t.Fatalf("decoded %+v from % x", conf, report)
+		}
+		if want := report[3] == 0x00; conf.Success != want {
+			t.Fatalf("status %#x decoded as success=%t", report[3], conf.Success)
 		}
 	})
 }

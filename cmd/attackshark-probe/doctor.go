@@ -16,7 +16,6 @@ import (
 	"attackshark-x11/internal/hidraw"
 	"attackshark-x11/internal/mouse"
 	"attackshark-x11/internal/notify"
-	"attackshark-x11/internal/trayapp"
 )
 
 // Check statuses. A failure is something that stops the app from working; a
@@ -84,17 +83,16 @@ func (d *doctor) finish() error {
 }
 
 // runDoctor checks the pieces a working installation needs and names the one
-// that is missing. It is read-only: it opens the receiver exactly the way the
-// tray app does, and never writes to the mouse.
+// that is missing. It is read-only itself: it opens the receiver for a status
+// report and never writes to the mouse, so it deliberately does not try the DPI
+// configuration read.
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	wait := fs.Duration("wait", 3*time.Second,
 		"how long to wait for a report when checking device access")
-	dpiConfig := fs.String("dpi-config", trayapp.DefaultDPIConfigPath(),
-		"the per-stage DPI values file to check")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s\n\nusage: attackshark-probe doctor [flags]\n\n",
-			"Check the udev rule, device access, DPI config, tray binary and session bus.")
+			"Check the udev rule, device access, tray binary and session bus.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -107,7 +105,6 @@ func runDoctor(args []string) error {
 	d := newDoctor(os.Stdout)
 	checkUdev(d)
 	checkDeviceAccess(d, *wait)
-	checkDPIConfig(d, *dpiConfig)
 	checkTrayBinary(d)
 	checkSessionBus(d)
 	return d.finish()
@@ -221,28 +218,6 @@ func accessHint(err error) string {
 			" 'sudo tools/install-udev.sh' and check that 'id -nG' lists plugdev."
 	}
 	return "run 'attackshark-probe info' to see what was discovered"
-}
-
-// checkDPIConfig reads the file the tray reads at startup. A malformed file is a
-// failure rather than a warning, because the tray refuses to start rather than
-// quietly discard values the user deliberately wrote.
-func checkDPIConfig(d *doctor, path string) {
-	if path == "" {
-		d.add("dpi config", statusWarn, "no path could be determined (no home directory?)")
-		return
-	}
-
-	stages, ok, err := trayapp.LoadDPIStages(path)
-	switch {
-	case err != nil:
-		d.add("dpi config", statusFail, err.Error(),
-			"the tray refuses to start with a file like this; fix it or delete it")
-	case ok:
-		d.add("dpi config", statusOK, fmt.Sprintf("%s: %s", path, stages))
-	default:
-		d.add("dpi config", statusOK, path+": no values set",
-			"the tray shows the stage with no DPI number attached, which is the honest default")
-	}
 }
 
 // checkTrayBinary looks for the installed tray app and the autostart entry that

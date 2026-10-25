@@ -8,25 +8,26 @@ import (
 )
 
 func testApp(dpi mouse.DPIStages) *app {
-	return &app{opt: Options{DPI: dpi, DPIConfigPath: "/tmp/dpi.conf"}}
+	return &app{opt: Options{}, deviceDPI: dpi}
 }
 
+// configured is a mapping of the kind the device reports: six values, all in
+// range.
 func configured(t *testing.T) mouse.DPIStages {
 	t.Helper()
-	stages, err := mouse.ParseDPIStages("800,1600,2400,3200,6400,22000")
+	stages, err := mouse.NewDPIStages([mouse.MaxStage]int{800, 1600, 2400, 3200, 6400, 22000})
 	if err != nil {
-		t.Fatalf("parsing test values: %v", err)
+		t.Fatalf("building test values: %v", err)
 	}
 	return stages
 }
 
-func TestTooltipWithoutConfiguredDPI(t *testing.T) {
+func TestTooltipWithoutDeviceDPI(t *testing.T) {
 	a := testApp(mouse.DPIStages{})
 	a.connected = true
 	a.haveBattery = true
 	a.battery = mouse.Battery{Percent: 78, Charge: mouse.ChargeDischarging}
 	a.haveStage = true
-	a.stageConfirmed = true
 	a.stage = mouse.Stage{Stage: 3}
 
 	got := a.tooltipLocked()
@@ -39,13 +40,12 @@ func TestTooltipWithoutConfiguredDPI(t *testing.T) {
 	}
 }
 
-func TestTooltipWithConfiguredDPI(t *testing.T) {
+func TestTooltipWithDeviceDPI(t *testing.T) {
 	a := testApp(configured(t))
 	a.connected = true
 	a.haveBattery = true
 	a.battery = mouse.Battery{Percent: 42, Charge: mouse.ChargeCharging}
 	a.haveStage = true
-	a.stageConfirmed = true
 	a.stage = mouse.Stage{Stage: 3}
 
 	if want, got := "Attack Shark X11 - 42 % (charging) - DPI stage 3 of 6 (2400 DPI)",
@@ -54,22 +54,10 @@ func TestTooltipWithConfiguredDPI(t *testing.T) {
 	}
 }
 
-func TestTooltipRememberedStageIsMarkedAsSuch(t *testing.T) {
-	a := testApp(configured(t))
-	a.connected = true
-	a.haveStage = true
-	a.stageConfirmed = false
-	a.stage = mouse.Stage{Stage: 5}
-
-	if want, got := "DPI stage 5 of 6, 6400 DPI (last seen)", a.tooltipLocked(); !strings.Contains(got, want) {
-		t.Errorf("tooltip = %q, want it to contain %q", got, want)
-	}
-}
-
 func TestTooltipStageUnknown(t *testing.T) {
 	a := testApp(configured(t))
 	a.connected = true
-	if want, got := "DPI stage unknown (tap the mouse's DPI button to sync)", a.tooltipLocked(); !strings.Contains(got, want) {
+	if want, got := "DPI stage unknown (the startup read did not report the selected stage)", a.tooltipLocked(); !strings.Contains(got, want) {
 		t.Errorf("tooltip = %q, want it to contain %q", got, want)
 	}
 }
@@ -108,15 +96,18 @@ func TestStageTitle(t *testing.T) {
 	}
 }
 
-func TestDPIMenuTooltipMentionsWhereNumbersComeFrom(t *testing.T) {
-	withValues := testApp(configured(t)).dpiMenuTooltip()
-	if !strings.Contains(withValues, "from your settings") {
-		t.Errorf("dpiMenuTooltip() = %q, want it to say where the values come from", withValues)
-	}
-
+func TestDPIMenuTooltipSaysWhenValuesAreMissing(t *testing.T) {
 	withoutValues := testApp(mouse.DPIStages{}).dpiMenuTooltip()
+	if !strings.Contains(withoutValues, "not been read from the mouse yet") {
+		t.Errorf("dpiMenuTooltip() = %q, want it to say the values have not been read", withoutValues)
+	}
 	if !strings.Contains(withoutValues, mouse.SensorName) || !strings.Contains(withoutValues, "22000 DPI") {
 		t.Errorf("dpiMenuTooltip() = %q, want it to cite the vendor's published sensor facts", withoutValues)
+	}
+
+	withValues := testApp(configured(t)).dpiMenuTooltip()
+	if strings.Contains(withValues, "not been read") {
+		t.Errorf("dpiMenuTooltip() = %q, want no missing-values claim once the device answered", withValues)
 	}
 }
 

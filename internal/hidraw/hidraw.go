@@ -1,6 +1,8 @@
 // Package hidraw provides device discovery and raw HID access for the
-// Attack Shark X11 receiver. It is read-only: nothing here writes to the
-// device.
+// Attack Shark X11 receiver. The status channel is read passively. SetFeature is
+// the only write, used for the firmware's 0xA0 read-permission request and for
+// writing the DPI configuration back when the user switches stage; nothing else
+// in the repository writes to the device.
 //
 // The receiver presents four HID interfaces. Only USB interface #2 carries the
 // vendor channel that pushes battery and DPI stage reports, and it is the only
@@ -85,6 +87,9 @@ var (
 	// HIDIOCGFEATURE reads a feature report. size must match the report length
 	// declared in the device's descriptor, plus one for the ID byte.
 	HIDIOCGFEATURE = func(size int) uintptr { return ioc(iocRead|iocWrite, hidType, 0x07, uintptr(size)) }
+	// HIDIOCSFEATURE writes a feature report. size is the buffer length in
+	// bytes, including the report ID byte for numbered reports.
+	HIDIOCSFEATURE = func(size int) uintptr { return ioc(iocRead|iocWrite, hidType, 0x06, uintptr(size)) }
 	// HIDIOCGINPUT reads an input report.
 	HIDIOCGINPUT = func(size int) uintptr { return ioc(iocRead|iocWrite, hidType, 0x0A, uintptr(size)) }
 	// HIDIOCGRDESCSIZE reads the report descriptor length.
@@ -287,10 +292,11 @@ func (d *Device) ioctlBuf(req uintptr, buf []byte) error {
 // GetFeature reads a feature report. size is the total report length declared
 // by the descriptor including the report ID byte, and buf[0] is the report ID.
 //
-// Note: this is here to document a negative result, not to be used. Reading any
-// feature report on the X11 receiver returns unaddressable data, because the
-// dongle ignores the requested report ID - see the negative results section of
-// README.md before building anything on top of it.
+// On this receiver a read only returns configuration if the firmware has first
+// granted permission for it: see mouse.ReadDPIConfig and the 0xA0 mailbox.
+// Without that grant the dongle ignores the requested report ID and returns
+// leftover bytes, which is what made the channel look unreadable before the
+// handshake was known.
 func (d *Device) GetFeature(reportID byte, size int) ([]byte, error) {
 	buf := make([]byte, size)
 	buf[0] = reportID
@@ -298,6 +304,21 @@ func (d *Device) GetFeature(reportID byte, size int) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// SetFeature writes one feature report, buf[0] being the report ID. Linux
+// implements this as HIDIOCSFEATURE, i.e. a HID SET_REPORT control transfer
+// (bmRequestType 0x21, bRequest 0x09, wValue 0x0300|reportID, wIndex = the
+// interface).
+//
+// There are exactly two frames behind this method: the 0xA0 read-permission
+// request, and the 0x04 configuration report written back when the user switches
+// DPI stage (see internal/mouse/dpistage.go). No other setting is ever written.
+func (d *Device) SetFeature(buf []byte) error {
+	if len(buf) == 0 {
+		return errors.New("hidraw: empty feature report")
+	}
+	return d.ioctlBuf(HIDIOCSFEATURE(len(buf)), buf)
 }
 
 // GetInput reads an input report.

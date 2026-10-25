@@ -8,9 +8,9 @@ import (
 
 // Published facts about the X11, taken from the vendor's own product page. They
 // are the only per-stage figures Attack Shark publishes: the number of stages
-// and the sensor's ceiling. The factory DPI value of each individual stage is
-// not published anywhere and is not readable from Linux - see the "DPI values"
-// section of README.md - so a stage's value is configuration, not telemetry.
+// and the sensor's ceiling. The per-stage values themselves are stored in the
+// mouse and read over the vendor feature reports (see dpiread.go), so this type
+// holds nothing but what the device reported.
 const (
 	// SensorName is the sensor the X11 ships with.
 	SensorName = "PixArt PAW3311"
@@ -19,13 +19,13 @@ const (
 )
 
 // DPIStages holds the DPI value of each of the mouse's six stages, index 0
-// being stage 1. The zero value means "not configured", which is distinct from
-// any real mapping because every accepted value is at least 1.
+// being stage 1. The zero value means "not read from the device yet", which is
+// distinct from any real mapping because every accepted value is at least 1.
 type DPIStages struct {
 	values [MaxStage]int
 }
 
-// Configured reports whether a complete mapping has been set.
+// Configured reports whether a complete mapping has been read.
 func (d DPIStages) Configured() bool { return d.values[0] != 0 }
 
 // At returns the DPI value of a 1-based stage. ok is false when stage is out of
@@ -50,29 +50,15 @@ func (d DPIStages) String() string {
 	return strings.Join(parts, "/")
 }
 
-// ParseDPIStages reads six DPI values, separated by commas, spaces or
-// semicolons, in stage order. Every value must be between 1 and MaxDPI: the
-// upper bound is the sensor's published maximum, so a value above it is a typo
-// rather than a setting.
+// NewDPIStages builds a mapping from the DPI value of each stage, in stage
+// order. Every value must be between 1 and MaxDPI, so a mapping that exists is
+// always one the sensor could hold.
 //
-// The returned mapping is empty whenever an error is returned, so a caller that
-// ignores the error is left with nothing to display rather than with a partly
-// applied set of numbers.
-func ParseDPIStages(text string) (DPIStages, error) {
-	fields := strings.FieldsFunc(text, func(r rune) bool {
-		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '/'
-	})
-	if len(fields) != MaxStage {
-		return DPIStages{}, fmt.Errorf("need %d DPI values (one per stage), got %d in %q",
-			MaxStage, len(fields), text)
-	}
-
+// Reading the device is the only source of these numbers in the app itself;
+// this constructor is for callers that already hold them - tests, mostly.
+func NewDPIStages(values [MaxStage]int) (DPIStages, error) {
 	var out DPIStages
-	for i, field := range fields {
-		value, err := strconv.Atoi(field)
-		if err != nil {
-			return DPIStages{}, fmt.Errorf("stage %d: %q is not a number", i+1, field)
-		}
+	for i, value := range values {
 		if value < 1 || value > MaxDPI {
 			return DPIStages{}, fmt.Errorf("stage %d: %d is outside 1-%d, the range the %s supports",
 				i+1, value, MaxDPI, SensorName)
@@ -83,7 +69,7 @@ func ParseDPIStages(text string) (DPIStages, error) {
 }
 
 // StageDescription describes one stage for menus and tooltips: "2400 DPI" when
-// a value is configured, and "" when it is not.
+// the device reported a value, and "" when it has not.
 func (d DPIStages) StageDescription(stage int) string {
 	value, ok := d.At(stage)
 	if !ok {

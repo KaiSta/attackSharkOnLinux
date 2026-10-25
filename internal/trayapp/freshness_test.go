@@ -80,7 +80,6 @@ func TestTooltipDatesAStaleReading(t *testing.T) {
 	a.battery = mouse.Battery{Percent: 78, Charge: mouse.ChargeDischarging}
 	a.batterySeen = time.Now().Add(-90 * time.Second)
 	a.haveStage = true
-	a.stageConfirmed = true
 	a.stage = mouse.Stage{Stage: 3}
 
 	got := a.tooltipLocked()
@@ -98,7 +97,6 @@ func TestTooltipLeavesAFreshReadingAlone(t *testing.T) {
 	a.battery = mouse.Battery{Percent: 78, Charge: mouse.ChargeDischarging}
 	a.batterySeen = time.Now()
 	a.haveStage = true
-	a.stageConfirmed = true
 	a.stage = mouse.Stage{Stage: 3}
 
 	if want, got := "Attack Shark X11 - 78 % (discharging) - DPI stage 3 of 6", a.tooltipLocked(); got != want {
