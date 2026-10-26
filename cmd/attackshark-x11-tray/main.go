@@ -55,8 +55,9 @@ func main() {
 			"only the selected stage changed, picking a DPI value writes it back with that\n"+
 			"stage's value changed, and picking a rate writes the polling-rate report; those\n"+
 			"are the only three settings this app modifies.\n\n"+
-			"Nothing is remembered between runs: if the read fails, the stage and its value\n"+
-			"stay unlabelled until the mouse reports them.\n")
+			"Nothing is remembered between runs: a refused read is asked for again a few\n"+
+			"times, and if the mouse still will not answer, the stage and its value stay\n"+
+			"unlabelled until it reports them.\n")
 	}
 	flag.Parse()
 

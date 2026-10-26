@@ -90,13 +90,23 @@ differ between units.
 
 ### When the read fails
 
-The tray asks for the DPI configuration and the polling rate once per device open
-(`-read-dpi`, on by default). A refused permission is retried after a pause,
-because this firmware needs a quiet moment between reads: on hardware,
-back-to-back reads without that pause failed about half the time. If anything is
-off — an older firmware without the mailbox, the wrong hidraw collection, a
-mouse that is asleep, a checksum that does not add up, a DPI code this build does
-not know — the read is abandoned and nothing is invented:
+The tray asks for the DPI configuration and the polling rate when it opens the
+device (`-read-dpi`, on by default). A refused permission is retried after a
+pause, because this firmware needs a quiet moment between reads: on hardware,
+back-to-back reads without that pause failed about half the time.
+
+The firmware refuses in bursts, not per request. Measured after a reboot, every
+request in one burst was declined and the next burst, seconds later, was granted,
+because each refused request restarts the cooldown. One attempt at login was
+therefore sometimes all that happened, and the tray reported `DPI unknown` for the
+rest of the session. A refused read is now asked for again after 2 s, 5 s, 15 s,
+45 s and 2 min; a grant ends the retries, and after the last one the value is
+left alone until the receiver is reopened (`attackshark-probe dpi` or a restart)
+rather than the device being poked forever.
+
+If nothing is granted — an older firmware without the mailbox, the wrong hidraw
+collection, a mouse that is switched off — the read is abandoned and nothing is
+invented:
 
 - the **DPI stages** entries stay as `Stage 3`, and the tooltip says the value
   has not been read;

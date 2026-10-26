@@ -8,7 +8,9 @@
 // polling-rate report. Reading the per-stage values needs the 0xA0 permission
 // frame. Those three feature writes are the app's only writes; the rest of what
 // it shows comes from reports the mouse pushes, plus the selected stage and
-// polling rate that the startup reads carry.
+// polling rate that the startup reads carry. The firmware refuses those reads in
+// bursts, so a refused one is asked for again a few times before the value is
+// left unknown (startupread.go).
 //
 // The selected stage arrives two ways: the configuration read carries it, so the
 // label is right from the moment the device opens, and the mouse announces it
@@ -112,6 +114,10 @@ type app struct {
 	// deviceDPI holds the values read from the mouse; the menus and tooltips
 	// label stages from it, and a confirmed write replaces it.
 	deviceDPI mouse.DPIStages
+	// stageRead and pollingRead retry the reads made when the device was opened;
+	// see startupRead. They are owned by the device goroutine.
+	stageRead   startupRead
+	pollingRead startupRead
 	// requests carries a click on a setting to the goroutine that owns the
 	// device. It is buffered so a click never blocks the UI.
 	requests chan settingRequest
@@ -771,19 +777,30 @@ func (a *app) notifyChange(message string) {
 	}
 }
 
+// featureReadWriter is the part of a hidraw device the startup reads need: one
+// feature write to ask, one feature read to receive. Keeping it an interface
+// means the retry behaviour can be tested without hardware.
+type featureReadWriter interface {
+	SetFeature(buf []byte) error
+	GetFeature(reportID byte, size int) ([]byte, error)
+}
+
 // readDeviceDPI asks the mouse for the values its stages are set to. Failure is
 // expected rather than exceptional - older firmware, the wrong HID collection or
-// a sleeping mouse all fail here - so it leaves the labels empty and only logs
-// why: a guessed number is worse than no number.
-func (a *app) readDeviceDPI(dev *hidraw.Device) {
+// a sleeping mouse all fail here - so it leaves the labels empty: a guessed
+// number is worse than no number. A refusal is retried, because the firmware
+// declines in bursts that pass within seconds.
+func (a *app) readDeviceDPI(dev featureReadWriter) {
 	if !a.opt.ReadDPI {
 		return
 	}
 	cfg, err := mouse.ReadDPIConfig(dev)
 	if err != nil {
 		a.log("could not read the DPI values from the device: %v", err)
+		a.noteReadFailure(&a.stageRead, "the DPI values and the selected stage")
 		return
 	}
+	a.stageRead.succeeded()
 
 	a.applyDeviceDPI(cfg.Stages)
 	// The same report carries the stage the device has selected, so the label no
@@ -804,15 +821,17 @@ func (a *app) readDeviceDPI(dev *hidraw.Device) {
 // same kind of read as the DPI configuration - one permission request, no
 // setting changed - and it is skipped with the same flag, because a machine that
 // cannot be read on one report usually cannot be read on the other.
-func (a *app) readDevicePolling(dev *hidraw.Device) {
+func (a *app) readDevicePolling(dev featureReadWriter) {
 	if !a.opt.ReadDPI {
 		return
 	}
 	cfg, err := mouse.ReadPollingRate(dev)
 	if err != nil {
 		a.log("could not read the polling rate from the device: %v", err)
+		a.noteReadFailure(&a.pollingRead, "the polling rate")
 		return
 	}
+	a.pollingRead.succeeded()
 
 	a.mu.Lock()
 	a.polling = cfg.Rate
@@ -821,6 +840,32 @@ func (a *app) readDevicePolling(dev *hidraw.Device) {
 
 	a.log("polling rate read from the device: %s (profile %d)", cfg.Rate, cfg.Profile)
 	a.refresh()
+}
+
+// noteReadFailure schedules another attempt after the device refused one of the
+// reads it makes when it is opened. The log says which of the two happened,
+// because "the read failed" on its own does not tell anyone whether the tray is
+// going to try again.
+func (a *app) noteReadFailure(read *startupRead, what string) {
+	now := time.Now()
+	if !read.failed(now) {
+		a.log("%s stay unknown until the receiver is reopened", what)
+		return
+	}
+	a.log("%s will be asked for again in %s", what, read.next.Sub(now).Round(time.Second))
+}
+
+// retryStartupReads asks again for a value the device refused when it was
+// opened. It runs on the goroutine that owns the file descriptor, before that
+// goroutine blocks on the status channel, so a retry cannot race a status read.
+func (a *app) retryStartupReads(dev featureReadWriter) {
+	now := time.Now()
+	if a.stageRead.due(now) {
+		a.readDeviceDPI(dev)
+	}
+	if a.pollingRead.due(now) {
+		a.readDevicePolling(dev)
+	}
 }
 
 // applyDeviceStage records the stage the device's configuration reports as the
@@ -938,10 +983,18 @@ func (a *app) deviceLoop() {
 				continue
 			}
 			a.setOpened(opened)
+			// A device that has just been opened gets a fresh set of attempts,
+			// so a receiver plugged back in is not left on an exhausted budget.
+			a.stageRead = startupRead{}
+			a.pollingRead = startupRead{}
 			a.readDeviceDPI(opened)
 			a.readDevicePolling(opened)
 			dev = opened
 		}
+
+		// A read the device refused when it was opened is asked for again here,
+		// before this iteration blocks on the status channel.
+		a.retryStartupReads(dev)
 
 		// A change whose confirmation window has closed is checked against the
 		// device's own configuration before it is called a failure, because the
